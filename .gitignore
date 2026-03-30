@@ -46,3 +46,4 @@ html/
 # Local files
 .DS_Store
 Thumbs.db
+.gui_state.json

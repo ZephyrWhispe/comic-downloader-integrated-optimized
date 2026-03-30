@@ -368,12 +368,12 @@ def download_file(url, filename=None, chunk_size=1024, verbose=False, transient=
                 # 如果无法删除，使用不同的文件名
                 timestamp = int(time.time())
                 new_destination = destination.parent / f"{destination.stem}_{timestamp}{destination.suffix}"
-                temp_file.replace(new_destination)
+                shutil.move(str(temp_file), str(new_destination))
                 console.print(f"[yellow]目标文件已存在，使用新文件名: {new_destination.name}[/yellow]")
                 download_logger.info(f"File already exists, using new filename: {new_destination.name}")
                 return new_destination
         
-        temp_file.replace(destination)
+        shutil.move(str(temp_file), str(destination))
         download_logger.info(f"Successfully moved file to: {destination}")
         return destination
     except PermissionError as e:

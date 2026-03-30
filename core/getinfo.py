@@ -32,6 +32,12 @@ DATE_CLASS_NAMES = (
     "date",
     "published",
 )
+PREFERRED_DOWNLOAD_LABELS = (
+    "DOWNLOAD NOW",
+    "MAIN SERVER",
+    "PIXELDRAIN",
+    "MEGA",
+)
 
 console = Console()
 
@@ -102,6 +108,12 @@ class GetComics:
         except (TypeError, ValueError):
             return None
 
+    def get_loaded_page(self) -> int:
+        try:
+            return max(0, int(self.page) - 1)
+        except (TypeError, ValueError):
+            return 0
+
     def _limit_links(self, links: Dict[str, str]) -> Dict[str, str]:
         try:
             limit = int(self.num_results_desired)
@@ -119,6 +131,17 @@ class GetComics:
         return int(match.group(0)) if match else None
 
     def _extract_article_year(self, article) -> Optional[int]:
+        article_text = article.get_text(" ", strip=True)
+        year = self._extract_year_from_text(article_text)
+        if year:
+            return year
+
+        title_tag = article.find("h1", {"class": "post-title"})
+        if title_tag:
+            year = self._extract_year_from_text(title_tag.get_text(" ", strip=True))
+            if year:
+                return year
+
         time_tag = article.find("time")
         if time_tag:
             for candidate in (
@@ -142,6 +165,58 @@ class GetComics:
                         return year
 
         return None
+
+    def _select_preferred_direct_link(self, candidates):
+        if not candidates:
+            return None
+
+        def candidate_rank(candidate):
+            label = candidate["label"]
+            for index, preferred_label in enumerate(PREFERRED_DOWNLOAD_LABELS):
+                if preferred_label in label:
+                    return (index, candidate["position"])
+            return (len(PREFERRED_DOWNLOAD_LABELS), candidate["position"])
+
+        return min(candidates, key=candidate_rank)
+
+    def _extract_post_download_links(self, soup, title: str) -> Dict[str, str]:
+        direct_candidates = []
+        mediafire_candidates = []
+
+        for position, tag in enumerate(soup.find_all("a", href=True)):
+            href = tag["href"]
+            link_text = tag.get_text(" ", strip=True).upper()
+            link_title = tag.get("title", "").upper()
+            label = " ".join(part for part in (link_text, link_title) if part).strip()
+
+            if "getcomics.org/download" in href or "getcomics.org/dlds/" in href:
+                direct_candidates.append(
+                    {
+                        "href": href,
+                        "label": label,
+                        "position": position,
+                    }
+                )
+                continue
+
+            if "MEDIAFIRE" in label:
+                mediafire_candidates.append(
+                    {
+                        "href": href,
+                        "position": position,
+                    }
+                )
+
+        page_comic_links: Dict[str, str] = {}
+        preferred_direct_link = self._select_preferred_direct_link(direct_candidates)
+        if preferred_direct_link:
+            page_comic_links[preferred_direct_link["href"]] = title
+            return page_comic_links
+
+        if mediafire_candidates:
+            page_comic_links[f"_MEDIAFIRE_{mediafire_candidates[0]['href']}"] = title
+
+        return page_comic_links
 
     def _extract_issue_number(self, title: str) -> Optional[float]:
         for pattern in ISSUE_PATTERNS:
@@ -367,40 +442,10 @@ class GetComics:
 
                     try:
                         soup = BeautifulSoup(html, "html.parser")
-                        all_links = soup.find_all("a", href=True)
-                        direct_links_found = False
-                        page_comic_links: Dict[str, str] = {}
-
-                        for tag in all_links:
-                            try:
-                                href = tag["href"]
-                                link_text = tag.get_text().upper()
-                                link_title = tag.get("title", "").upper()
-                                if (
-                                    "DOWNLOAD NOW" in link_text
-                                    or "DOWNLOAD NOW" in link_title
-                                    or "MAIN SERVER" in link_text
-                                ) and (
-                                    "getcomics.org/download" in href
-                                    or "getcomics.org/dlds/" in href
-                                ):
-                                    page_comic_links[href] = title
-                                    direct_links_found = True
-                            except Exception as exc:
-                                if self.verbose:
-                                    console.print(f"Error processing link: {exc}")
-
-                        if not direct_links_found:
-                            for tag in all_links:
-                                try:
-                                    href = tag["href"]
-                                    link_text = tag.get_text().upper()
-                                    link_title = tag.get("title", "").upper()
-                                    if "MEDIAFIRE" in link_text or "MEDIAFIRE" in link_title:
-                                        page_comic_links[f"_MEDIAFIRE_{href}"] = title
-                                except Exception as exc:
-                                    if self.verbose:
-                                        console.print(f"Error processing Mediafire link: {exc}")
+                        page_comic_links = self._extract_post_download_links(soup, title)
+                        direct_links_found = any(
+                            not key.startswith("_MEDIAFIRE_") for key in page_comic_links
+                        )
 
                         cache.set(cache_key, page_comic_links)
                         filtered_links = self._apply_download_filters(page_comic_links)

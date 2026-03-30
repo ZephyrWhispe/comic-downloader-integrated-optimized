@@ -4,6 +4,7 @@ import os
 from tempfile import TemporaryDirectory
 
 from core.comic_downloader import ComicDownloader
+from sites.registry import get_site_module
 
 
 class DummySiteModule:
@@ -24,6 +25,20 @@ class DummySiteModule:
 
 
 class ComicDownloaderSiteRegistryTests(unittest.TestCase):
+    def test_real_registry_matches_readcomicsonline_lol(self):
+        site = get_site_module("https://readcomicsonline.lol/comic/test-comic")
+
+        self.assertIsNotNone(site)
+        self.assertEqual("readcomicsonline.lol", site.key)
+        self.assertIn("readcomicsonline.lol", site.domains)
+
+    def test_real_registry_matches_readcomicsonline_lol_cdn_urls(self):
+        site = get_site_module("https://cdn.readcomicsonline.lol/pages/test-comic/issue-001/p001.webp")
+
+        self.assertIsNotNone(site)
+        self.assertEqual("readcomicsonline.lol", site.key)
+        self.assertEqual(("readcomicsonline.lol",), site.domains)
+
     def test_resolve_chapter_url_uses_site_module(self):
         downloader = ComicDownloader.__new__(ComicDownloader)
         downloader.parsers = {"example.com": object()}

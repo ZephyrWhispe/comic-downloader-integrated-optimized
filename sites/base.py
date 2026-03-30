@@ -9,6 +9,7 @@ class SiteModule:
     display_name: str
     domains: tuple[str, ...]
     parser_factory: Callable[[], object]
+    match_domains: tuple[str, ...] | None = None
     default_max_workers: int = 6
     default_max_retries: int = 3
     default_download_delay: float = 0.1
@@ -20,7 +21,8 @@ class SiteModule:
     def matches(self, url: str) -> bool:
         if not url:
             return False
-        return any(domain in url for domain in self.domains)
+        candidate_domains = self.match_domains or self.domains
+        return any(domain in url for domain in candidate_domains)
 
     def create_parser(self):
         return self.parser_factory()

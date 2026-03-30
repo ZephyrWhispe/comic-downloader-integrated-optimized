@@ -1,129 +1,212 @@
 # Comic Downloader Integrated
 
-这是一个整合了两个漫画下载工具的项目：
-1. Comic-DL - 从多个漫画网站下载漫画
-2. GetComics Downloader - 从 getcomics.org 下载漫画
+整合了两个漫画下载工作流：
 
-## 功能特性
+1. `Comic-DL`：从多个在线漫画站点抓取章节并下载图片。
+2. `GetComics Downloader`：从 `getcomics.org` 搜索条目并批量下载。
 
-- **GetComics 下载器**：从 getcomics.org 搜索和下载漫画
-- **Comic-DL 下载器**：从多个漫画网站下载漫画，支持以下网站：
-  - readallcomics.com
-  - readcomiconline.li
-  - readcomicsonline.ru
-  - xoxocomic.com
-  - batcave.biz
-- **统一的菜单界面**：方便用户选择使用哪个下载器
-- **支持 aria2c 下载**：提供更快的下载速度
-- **缓存功能**：提高搜索和下载效率
+## 主要功能
+
+- 支持 GUI 和命令行两种启动方式。
+- Windows 下优先使用项目内 `venv`，避免把依赖装到系统 Python。
+- `Comic-DL` 当前支持这些站点：
+  - `readallcomics.com`
+  - `readcomiconline.li`
+  - `readcomicsonline.lol`
+  - `readcomicsonline.ru`
+  - `xoxocomic.com`
+  - `batcave.biz`
+- `GetComics Downloader` 支持：
+  - 关键词搜索
+  - 日期筛选
+  - 结果数量切换
+  - 上一页、下一页、跳页
+  - 最近搜索记录
+  - 自动恢复上次搜索条件和缓存结果
+  - 结果详情页打开
+  - 批量复制结果链接
+  - 右键结果菜单
+  - 收藏夹持久化
+  - 收藏导入 / 导出 JSON
+  - 下载队列持久化
+  - 从队列批量下载
+- 新增本地 `漫画阅读器`：
+  - 扫描漫画目录
+  - 查看 CBZ / ZIP / 图片文件夹
+  - 显示页数、大小、修改时间、路径
+  - 直接在 GUI 中翻页阅读
+  - 记住上次目录、选中的漫画和阅读页码
+  - 打开原文件和所在目录
+- 支持 `aria2c` 加速下载。
+- 支持 Playwright/Chromium 依赖自动安装。
 
 ## 快速开始
 
-### 1. 环境准备 (仅需一次)
+### 1. 安装依赖
 
-如果你是第一次在电脑上使用，或者刚把项目拷贝到新电脑，请双击运行：
+首次使用，或把项目复制到新电脑后，请先运行：
 
-`install.bat`
+```bat
+install.bat
+```
 
-该脚本会自动完成以下操作：
-- 检查并配置 Python 环境。
-- 创建虚拟环境 (`venv`) 以保持系统整洁。
-- 安装所有必需的依赖库（包括 `aiohttp`, `playwright`, `requests-toolbelt` 等）。
-- 下载并安装 Playwright 浏览器内核 (Chromium)。
+它会自动完成这些操作：
 
-**注意**：脚本已优化为支持 UTF-8 编码，确保在中文 Windows 环境下稳定运行。
+- 检查 Python 环境
+- 创建或修复项目内虚拟环境 `venv`
+- 安装 `requirements.txt` 中的依赖
+- 安装 Playwright 所需的 Chromium
 
 ### 2. 启动程序
 
-- **GUI 图形界面版 (推荐)**：双击 `run-gui.bat`
-- **命令行版**：双击 `run.bat`
+推荐直接运行：
 
----
-
-## 安装依赖 (手动方式)
-
-如果你不想使用 `install.bat`，也可以手动配置：
-
-1. 确保安装了 Python 3.10 或更高版本。
-2. 安装所需的依赖包：
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. 安装浏览器内核：
-   ```bash
-   playwright install chromium
-   ```
-
-## 跨电脑迁移指南
-
-本项目支持“文件夹级”的无缝迁移。只需将整个项目文件夹拷贝到新电脑，然后运行 `install.bat` 即可快速恢复运行环境。
-
-## 使用指南
-
-1. 启动程序后，会显示主菜单，选择要使用的下载器：
-   - 1: GetComics Downloader - 从 getcomics.org 下载漫画
-   - 2: Comic-DL Downloader - 从多个网站下载漫画
-   - 3: 退出程序
-
-2. **GetComics Downloader 使用**：
-   - 输入搜索关键词
-   - 选择要下载的漫画
-   - 等待下载完成
-
-3. **Comic-DL Downloader 使用**：
-   - 输入漫画的 URL
-   - 选择保存目录
-   - 等待下载完成
-
-## 配置选项
-
-在使用 GetComics Downloader 时，可以通过选项菜单设置：
-- 下载目录
-- 结果数量
-- 是否使用 aria2c 下载
-- 其他选项
-
-## 注意事项
-
-- 确保网络连接正常
-- 对于某些网站，可能需要安装 Playwright 浏览器驱动：
-  ```bash
-  playwright install
-  ```
-- aria2c 下载需要 aria2c 可执行文件，可从官方网站下载并放在项目根目录
-
-## 项目结构
-
-```
-comic-downloader-integrated/
-├── core/
-│   ├── main.py          # 主程序入口
-│   ├── comic_downloader.py  # Comic-DL 下载器
-│   ├── browser_manager.py   # 浏览器管理器
-│   ├── getinfo.py        # GetComics 信息获取
-│   ├── download.py       # 下载功能
-│   ├── menu.py           # 菜单界面
-│   ├── logger.py         # 日志功能
-│   └── cache.py          # 缓存功能
-├── sites/
-│   ├── registry.py       # 站点注册表
-│   ├── batcave.py        # BatCave 站点模块
-│   ├── readallcomics.py  # ReadAllComics 站点模块
-│   ├── readcomiconline_li.py  # ReadComicOnline.li 站点模块
-│   ├── readcomicsonline_ru.py  # ReadComicsOnline.ru 站点模块
-│   └── xoxocomic.py      # XoxoComic 站点模块
-├── parsers/
-│   ├── __init__.py
-│   ├── base_parser.py    # 解析器基类
-│   ├── batcave_biz_parser.py  # batcave.biz 解析器
-│   ├── readallcomics_parser.py  # readallcomics.com 解析器
-│   ├── readcomiconline_li_parser.py  # readcomiconline.li 解析器
-│   ├── readcomicsonline_ru_parser.py  # readcomicsonline.ru 解析器
-│   └── xoxocomic_parser.py  # xoxocomic.com 解析器
-├── run.bat              # 运行脚本
-└── README.md            # 说明文档
+```bat
+run-gui.bat
 ```
 
-## 许可证
+如果想使用命令行版本：
 
-本项目基于原始的 Comic-DL 和 GetComics Downloader 项目，保留其各自的许可证。
+```bat
+run.bat
+```
+
+这两个脚本都会优先调用项目内 `venv\Scripts\python.exe`。
+
+## 手动安装
+
+如果你不想使用批处理脚本，也可以手动执行：
+
+```bash
+python -m venv venv
+venv\Scripts\python.exe -m pip install -U pip
+venv\Scripts\python.exe -m pip install -r requirements.txt
+venv\Scripts\python.exe -m playwright install chromium
+```
+
+## GetComics 使用说明
+
+1. 打开 `GetComics Downloader` 页面。
+2. 输入搜索关键词，可选填写日期筛选。
+3. 选择每页结果数量后开始搜索。
+4. 通过 `上一页`、`下一页` 或 `跳转` 浏览结果。
+5. 可对搜索结果执行这些操作：
+   - 双击打开详情页
+   - 批量复制链接
+   - 加入收藏
+   - 移出收藏
+   - 加入队列
+   - 移出队列
+6. `查看收藏` 可以切换到收藏视图，收藏会写入 `.gui_state.json`。
+7. `查看队列` 可以切换到下载队列视图，队列也会持久化保存。
+8. `下载队列` 会按当前队列内容批量下载。
+
+## Comic-DL 使用说明
+
+1. 打开 `Comic-DL Downloader` 页面。
+2. 输入漫画主页或章节链接。
+3. 选择保存目录。
+4. 获取章节信息。
+5. 选择要下载的章节后开始下载。
+
+## 漫画阅读器使用说明
+
+1. 打开 `漫画阅读器` 页面。
+2. 选择漫画根目录，或者直接选择单个 `CBZ` / `ZIP` 文件。
+3. 点击 `刷新列表` 扫描本地漫画。
+4. 在左侧列表选择条目后，可以先查看文件信息。
+5. 点击 `开始阅读` 后可使用 `首页`、`上一页`、`下一页`、`末页` 和页码跳转阅读。
+6. 支持 `Left` / `Right`、`PageUp` / `PageDown`、`Home` / `End` 快捷翻页。
+7. `打开文件` 可用系统默认程序查看原文件，`打开所在目录` 可直接跳到本地位置。
+8. 关闭后重新打开 GUI，会尽量恢复到上次阅读的位置。
+
+## 未完成任务
+
+- 阅读器图片缩放和“适应宽度 / 适应窗口”模式还没有加入。
+- 双页阅读、连续滚动阅读模式还没有实现。
+- 目前只记住当前一次阅读状态，还没有做到“按每本漫画分别保存进度”。
+- 本地阅读器暂时只支持图片文件夹、`CBZ`、`ZIP`，`PDF`、`RAR`、`7z` 还未支持。
+- 阅读器列表还没有搜索、筛选、排序切换等更完整的库管理功能。
+
+## 目录结构
+
+```text
+comic-downloader-integrated-optimized/
+├─ core/
+│  ├─ browser_manager.py
+│  ├─ cache.py
+│  ├─ comic_downloader.py
+│  ├─ comic_reader.py
+│  ├─ download.py
+│  ├─ getcomics_gui_helpers.py
+│  ├─ getinfo.py
+│  ├─ gui.py
+│  ├─ gui_state.py
+│  ├─ logger.py
+│  ├─ main.py
+│  ├─ menu.py
+│  └─ series_downloader.py
+├─ parsers/
+│  ├─ batcave_biz_parser.py
+│  ├─ readallcomics_parser.py
+│  ├─ readcomiconline_li_parser.py
+│  ├─ readcomicsonline_lol_parser.py
+│  ├─ readcomicsonline_ru_parser.py
+│  └─ xoxocomic_parser.py
+├─ sites/
+│  ├─ base.py
+│  ├─ batcave.py
+│  ├─ readallcomics.py
+│  ├─ readcomiconline_li.py
+│  ├─ readcomicsonline_lol.py
+│  ├─ readcomicsonline_ru.py
+│  ├─ registry.py
+│  └─ xoxocomic.py
+├─ tests/
+├─ install.bat
+├─ run-gui.bat
+├─ run.bat
+└─ README.md
+```
+
+## 常见问题
+
+### GUI 提示缺少依赖
+
+先重新运行：
+
+```bat
+install.bat
+```
+
+如果你之前是直接用系统 Python 安装依赖，建议删除旧的 `venv` 后重新安装一次。
+
+### Playwright 无法启动
+
+重新执行：
+
+```bash
+venv\Scripts\python.exe -m playwright install chromium
+```
+
+### aria2c 未生效
+
+请确认 `aria2c.exe` 可用，并且已经放到系统 `PATH` 或项目可访问的位置。
+
+## 测试
+
+运行全部单元测试：
+
+```bash
+venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+检查关键文件语法：
+
+```bash
+venv\Scripts\python.exe -m py_compile core\gui.py core\gui_state.py
+```
+
+## 说明
+
+本项目基于原始的 Comic-DL 和 GetComics Downloader 思路整合而成，请仅在遵守目标站点条款和当地法律的前提下使用。
