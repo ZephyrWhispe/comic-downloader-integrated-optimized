@@ -1,0 +1,12 @@
+# 基础依赖
+requests
+beautifulsoup4
+rich
+cloudscraper
+customtkinter
+Pillow
+playwright
+aiohttp
+requests-toolbelt
+
+
