@@ -70,6 +70,8 @@ class GuiStateTests(unittest.TestCase):
         self.assertEqual(0.0, state["reader"]["scroll_y"])
         self.assertEqual("Dark", state["settings"]["appearance_mode"])
         self.assertEqual("smooth", state["settings"]["reader_windows_fullscreen_mode"])
+        self.assertEqual("F:/Comics", state["settings"]["download_dir"])
+        self.assertEqual("F:/Comics", state["settings"]["library_dir"])
         self.assertEqual("", state["settings"]["rename_api_key"])
         self.assertEqual(DEFAULT_RENAME_API_URL, state["settings"]["rename_api_url"])
         self.assertEqual(DEFAULT_RENAME_API_MODEL, state["settings"]["rename_api_model"])
@@ -268,6 +270,8 @@ class GuiStateTests(unittest.TestCase):
                 "settings": {
                     "appearance_mode": "System",
                     "reader_windows_fullscreen_mode": "exclusive",
+                    "download_dir": " F:/Downloads/Comics ",
+                    "library_dir": " F:/Library/Comics ",
                     "rename_api_key": " sk-test ",
                     "rename_api_url": " https://example.com/v1/chat/completions ",
                     "rename_api_model": " custom-model ",
@@ -279,6 +283,8 @@ class GuiStateTests(unittest.TestCase):
 
         self.assertEqual("System", state["settings"]["appearance_mode"])
         self.assertEqual("exclusive", state["settings"]["reader_windows_fullscreen_mode"])
+        self.assertEqual("F:/Downloads/Comics", state["settings"]["download_dir"])
+        self.assertEqual("F:/Library/Comics", state["settings"]["library_dir"])
         self.assertEqual("sk-test", state["settings"]["rename_api_key"])
         self.assertEqual(
             "https://example.com/v1/chat/completions",
@@ -329,6 +335,8 @@ class GuiStateTests(unittest.TestCase):
                 "settings": {
                     "appearance_mode": "System",
                     "reader_windows_fullscreen_mode": "exclusive",
+                    "download_dir": "F:/Books",
+                    "library_dir": "F:/Books/Library",
                     "rename_api_key": "sk-test",
                     "rename_api_url": "https://example.com/v1/chat/completions",
                     "rename_api_model": "custom-model",
@@ -354,6 +362,8 @@ class GuiStateTests(unittest.TestCase):
             self.assertEqual(0.6, payload["reader"]["scroll_y"])
             self.assertEqual("System", payload["settings"]["appearance_mode"])
             self.assertEqual("exclusive", payload["settings"]["reader_windows_fullscreen_mode"])
+            self.assertEqual("F:/Books", payload["settings"]["download_dir"])
+            self.assertEqual("F:/Books/Library", payload["settings"]["library_dir"])
             self.assertEqual("sk-test", payload["settings"]["rename_api_key"])
             self.assertEqual(
                 "https://example.com/v1/chat/completions",
@@ -401,6 +411,8 @@ class GuiStateTests(unittest.TestCase):
                     "settings": {
                         "appearance_mode": "Dark",
                         "reader_windows_fullscreen_mode": "smooth",
+                        "download_dir": "F:/Comics",
+                        "library_dir": "F:/Comics",
                         "rename_api_key": "",
                         "rename_api_url": DEFAULT_RENAME_API_URL,
                         "rename_api_model": DEFAULT_RENAME_API_MODEL,

@@ -310,6 +310,15 @@ class ComicDownloaderQtWindow(QMainWindow):
             settings_state.get("reader_windows_fullscreen_mode", DEFAULT_WINDOWS_READER_FULLSCREEN_MODE)
             or DEFAULT_WINDOWS_READER_FULLSCREEN_MODE
         )
+        self.default_download_dir = (
+            str(settings_state.get("download_dir", self.gui_state["getcomics"].get("save_dir", self.default_getcomics_save_dir)) or "").strip()
+            or self.default_getcomics_save_dir
+        )
+        self.default_library_dir = (
+            str(settings_state.get("library_dir", self.gui_state["reader"].get("source_path", self.default_download_dir)) or "").strip()
+            or self.default_download_dir
+        )
+        self.default_getcomics_save_dir = self.default_download_dir
         self.rename_api_key = str(settings_state.get("rename_api_key", "") or "").strip()
         self.rename_api_url = str(settings_state.get("rename_api_url", DEFAULT_RENAME_API_URL) or DEFAULT_RENAME_API_URL).strip()
         self.rename_api_model = str(settings_state.get("rename_api_model", DEFAULT_RENAME_API_MODEL) or DEFAULT_RENAME_API_MODEL).strip()
@@ -319,6 +328,7 @@ class ComicDownloaderQtWindow(QMainWindow):
             self.rename_api_timeout = DEFAULT_RENAME_API_TIMEOUT
 
         self.comic_dl_downloader = ComicDownloader()
+        self.comic_dl_downloader.set_base_dir(self.default_download_dir)
         self.comic_title = ""
         self.chapter_data = []
         self.is_cancelled = False
@@ -364,6 +374,7 @@ class ComicDownloaderQtWindow(QMainWindow):
 
         self.rename_files = []
         self._threads = []
+        self._background_tasks = []
         self._latest_error_text = "暂无错误"
         self._pending_log_lines = []
         self._ui_ready = False
@@ -470,6 +481,69 @@ class ComicDownloaderQtWindow(QMainWindow):
         title.setStyleSheet("font-size: 28px; font-weight: 700;")
         layout.addWidget(title)
 
+        hero_group = QGroupBox("欢迎回来")
+        hero_layout = QVBoxLayout(hero_group)
+        hero_layout.setSpacing(12)
+        hero_summary = QLabel(
+            "把在线抓取、批量下载、本地书库、格式整理和阅读体验放到同一个工作台里，减少来回切换工具的打断感。"
+        )
+        hero_summary.setWordWrap(True)
+        hero_summary.setStyleSheet("font-size: 14px;")
+        hero_layout.addWidget(hero_summary)
+
+        quick_row = QHBoxLayout()
+        quick_row.setSpacing(10)
+        for button_text, tab_name in (
+            ("开始抓取章节", "comic_dl"),
+            ("搜索 GetComics", "getcomics"),
+            ("打开书库", "reader_library"),
+            ("进入阅读器", "reader_view"),
+        ):
+            button = QPushButton(button_text)
+            button.setMinimumHeight(36)
+            button.clicked.connect(lambda _checked=False, name=tab_name: self.switch_tab(name))
+            quick_row.addWidget(button)
+        quick_row.addStretch(1)
+        hero_layout.addLayout(quick_row)
+        layout.addWidget(hero_group)
+
+        summary_grid = QGridLayout()
+        summary_grid.setHorizontalSpacing(14)
+        summary_grid.setVerticalSpacing(14)
+        layout.addLayout(summary_grid)
+
+        self.home_download_summary_label = QLabel()
+        self.home_download_summary_label.setWordWrap(True)
+        self.home_download_summary_label.setStyleSheet("font-size: 13px;")
+        download_card = QGroupBox("默认下载位置")
+        download_layout = QVBoxLayout(download_card)
+        download_layout.addWidget(self.home_download_summary_label)
+        summary_grid.addWidget(download_card, 0, 0)
+
+        self.home_library_summary_label = QLabel()
+        self.home_library_summary_label.setWordWrap(True)
+        self.home_library_summary_label.setStyleSheet("font-size: 13px;")
+        library_card = QGroupBox("当前书库位置")
+        library_layout = QVBoxLayout(library_card)
+        library_layout.addWidget(self.home_library_summary_label)
+        summary_grid.addWidget(library_card, 0, 1)
+
+        self.home_workspace_summary_label = QLabel()
+        self.home_workspace_summary_label.setWordWrap(True)
+        self.home_workspace_summary_label.setStyleSheet("font-size: 13px;")
+        workspace_card = QGroupBox("工作台概览")
+        workspace_layout = QVBoxLayout(workspace_card)
+        workspace_layout.addWidget(self.home_workspace_summary_label)
+        workflow_tip = QLabel(
+            "建议流程：抓取章节或搜索整卷资源 -> 统一下载目录 -> 转换 / 重命名 -> 进入书库阅读。"
+        )
+        workflow_tip.setWordWrap(True)
+        workflow_tip.setStyleSheet("font-size: 12px; color: #6b7c8f;")
+        workspace_layout.addWidget(workflow_tip)
+        summary_grid.addWidget(workspace_card, 1, 0, 1, 2)
+        summary_grid.setColumnStretch(0, 1)
+        summary_grid.setColumnStretch(1, 1)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(14)
@@ -514,6 +588,40 @@ class ComicDownloaderQtWindow(QMainWindow):
     def setup_comic_dl_tab(self):
         layout = QVBoxLayout(self.comic_dl_tab)
         layout.setSpacing(10)
+
+        path_group = QGroupBox("默认路径")
+        path_layout = QFormLayout(path_group)
+        self.settings_download_dir_edit = QLineEdit()
+        download_row = QWidget()
+        download_row_layout = QHBoxLayout(download_row)
+        download_row_layout.setContentsMargins(0, 0, 0, 0)
+        download_row_layout.addWidget(self.settings_download_dir_edit, 1)
+        download_browse_button = QPushButton("浏览")
+        download_browse_button.clicked.connect(self.browse_settings_download_dir)
+        download_open_button = QPushButton("打开")
+        download_open_button.clicked.connect(lambda: self.open_folder(self.settings_download_dir_edit.text()))
+        download_row_layout.addWidget(download_browse_button)
+        download_row_layout.addWidget(download_open_button)
+
+        self.settings_library_dir_edit = QLineEdit()
+        self.settings_library_dir_edit.setPlaceholderText("可填写书库目录，或手动粘贴单个漫画文件路径")
+        library_row = QWidget()
+        library_row_layout = QHBoxLayout(library_row)
+        library_row_layout.setContentsMargins(0, 0, 0, 0)
+        library_row_layout.addWidget(self.settings_library_dir_edit, 1)
+        library_browse_button = QPushButton("浏览")
+        library_browse_button.clicked.connect(self.browse_settings_library_dir)
+        library_open_button = QPushButton("打开")
+        library_open_button.clicked.connect(lambda: self.open_folder(self.settings_library_dir_edit.text()))
+        library_row_layout.addWidget(library_browse_button)
+        library_row_layout.addWidget(library_open_button)
+
+        self.settings_paths_hint_label = QLabel("保存设置后会同步到 Comic-DL、GetComics 和漫画书库页面。")
+        self.settings_paths_hint_label.setWordWrap(True)
+        path_layout.addRow("下载位置", download_row)
+        path_layout.addRow("书库位置", library_row)
+        path_layout.addRow("说明", self.settings_paths_hint_label)
+        layout.addWidget(path_group)
 
         url_group = QGroupBox("漫画地址")
         url_layout = QGridLayout(url_group)
@@ -999,6 +1107,40 @@ class ComicDownloaderQtWindow(QMainWindow):
         layout = QVBoxLayout(self.settings_tab)
         layout.setSpacing(10)
 
+        self.settings_paths_group = QGroupBox("默认路径")
+        settings_paths_layout = QFormLayout(self.settings_paths_group)
+        self.settings_download_path_edit = QLineEdit()
+        settings_download_row = QWidget()
+        settings_download_row_layout = QHBoxLayout(settings_download_row)
+        settings_download_row_layout.setContentsMargins(0, 0, 0, 0)
+        settings_download_row_layout.addWidget(self.settings_download_path_edit, 1)
+        settings_download_browse_button = QPushButton("浏览")
+        settings_download_browse_button.clicked.connect(self.browse_settings_download_dir)
+        settings_download_open_button = QPushButton("打开")
+        settings_download_open_button.clicked.connect(lambda: self.open_folder(self.settings_download_path_edit.text()))
+        settings_download_row_layout.addWidget(settings_download_browse_button)
+        settings_download_row_layout.addWidget(settings_download_open_button)
+
+        self.settings_library_path_edit = QLineEdit()
+        self.settings_library_path_edit.setPlaceholderText("可填写书库目录，或手动粘贴单个漫画文件路径")
+        settings_library_row = QWidget()
+        settings_library_row_layout = QHBoxLayout(settings_library_row)
+        settings_library_row_layout.setContentsMargins(0, 0, 0, 0)
+        settings_library_row_layout.addWidget(self.settings_library_path_edit, 1)
+        settings_library_browse_button = QPushButton("浏览")
+        settings_library_browse_button.clicked.connect(self.browse_settings_library_dir)
+        settings_library_open_button = QPushButton("打开")
+        settings_library_open_button.clicked.connect(lambda: self.open_folder(self.settings_library_path_edit.text()))
+        settings_library_row_layout.addWidget(settings_library_browse_button)
+        settings_library_row_layout.addWidget(settings_library_open_button)
+
+        self.settings_paths_hint_text = QLabel("保存设置后会同步到 Comic-DL、GetComics 和漫画书库页面。")
+        self.settings_paths_hint_text.setWordWrap(True)
+        settings_paths_layout.addRow("下载位置", settings_download_row)
+        settings_paths_layout.addRow("书库位置", settings_library_row)
+        settings_paths_layout.addRow("说明", self.settings_paths_hint_text)
+        layout.addWidget(self.settings_paths_group)
+
         appearance_group = QGroupBox("外观与阅读")
         appearance_layout = QFormLayout(appearance_group)
         self.settings_appearance_combo = QComboBox()
@@ -1149,6 +1291,12 @@ class ComicDownloaderQtWindow(QMainWindow):
 
     def run_background(self, task_name, worker, on_result=None, on_error=None, on_finished=None, on_progress=None, on_info=None):
         signals = TaskSignals()
+        task_ref = {
+            "name": task_name,
+            "signals": signals,
+            "thread": None,
+        }
+        self._background_tasks.append(task_ref)
 
         def handle_progress(value):
             if on_progress:
@@ -1174,6 +1322,9 @@ class ComicDownloaderQtWindow(QMainWindow):
 
         def handle_finished():
             self.prune_finished_threads()
+            if task_ref in self._background_tasks:
+                self._background_tasks.remove(task_ref)
+            signals.deleteLater()
             if on_finished:
                 on_finished()
 
@@ -1193,9 +1344,102 @@ class ComicDownloaderQtWindow(QMainWindow):
                 signals.finished.emit()
 
         thread = threading.Thread(target=runner, daemon=True, name=task_name)
+        task_ref["thread"] = thread
         self._threads.append(thread)
         thread.start()
         return thread
+
+    def set_line_edit_value(self, widget, value):
+        if widget is None:
+            return
+        text = str(value or "")
+        if widget.text() == text:
+            return
+        previous = widget.blockSignals(True)
+        widget.setText(text)
+        widget.blockSignals(previous)
+
+    def apply_download_directory(self, directory, persist=False):
+        normalized = str(Path(str(directory or "").strip() or self.default_download_dir).expanduser())
+        self.default_download_dir = normalized
+        self.default_getcomics_save_dir = normalized
+        self.comic_dl_downloader.set_base_dir(normalized)
+
+        if hasattr(self, "comic_dl_save_dir_edit"):
+            self.set_line_edit_value(self.comic_dl_save_dir_edit, normalized)
+        if hasattr(self, "getcomics_save_dir_edit"):
+            self.set_line_edit_value(self.getcomics_save_dir_edit, normalized)
+        if hasattr(self, "settings_download_path_edit"):
+            self.set_line_edit_value(self.settings_download_path_edit, normalized)
+
+        self.refresh_home_dashboard()
+        if persist:
+            self.persist_gui_state_snapshot()
+
+    def apply_library_directory(self, directory, persist=False):
+        normalized = str(
+            Path(str(directory or "").strip() or self.default_library_dir or self.default_download_dir).expanduser()
+        )
+        self.default_library_dir = normalized
+
+        if hasattr(self, "reader_source_edit"):
+            self.set_line_edit_value(self.reader_source_edit, normalized)
+        if hasattr(self, "settings_library_path_edit"):
+            self.set_line_edit_value(self.settings_library_path_edit, normalized)
+
+        self.refresh_home_dashboard()
+        if persist:
+            self.persist_gui_state_snapshot()
+
+    def refresh_home_dashboard(self):
+        download_dir = self.default_download_dir
+        if hasattr(self, "comic_dl_save_dir_edit") and self.comic_dl_save_dir_edit.text().strip():
+            download_dir = self.comic_dl_save_dir_edit.text().strip()
+
+        library_dir = self.default_library_dir or self.default_download_dir
+        if hasattr(self, "reader_source_edit") and self.reader_source_edit.text().strip():
+            library_dir = self.reader_source_edit.text().strip()
+
+        supported_count = len(self.comic_dl_downloader.get_supported_sites())
+        queue_count = len(self.getcomics_download_queue)
+        favorites_count = len(self.getcomics_favorites)
+
+        if hasattr(self, "home_download_summary_label"):
+            self.home_download_summary_label.setText(
+                f"{download_dir}\n\nComic-DL 和 GetComics 会默认写入这个位置。"
+            )
+        if hasattr(self, "home_library_summary_label"):
+            self.home_library_summary_label.setText(
+                f"{library_dir}\n\n用于扫描本地漫画、恢复阅读入口和快速进入书库。"
+            )
+        if hasattr(self, "home_workspace_summary_label"):
+            self.home_workspace_summary_label.setText(
+                f"已注册站点 {supported_count} 个，当前收藏 {favorites_count} 个，下载队列 {queue_count} 个。"
+            )
+
+    def browse_settings_download_dir(self):
+        current_dir = ""
+        if hasattr(self, "settings_download_path_edit"):
+            current_dir = self.settings_download_path_edit.text().strip()
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择默认下载目录",
+            current_dir or self.default_download_dir,
+        )
+        if directory:
+            self.apply_download_directory(directory, persist=False)
+
+    def browse_settings_library_dir(self):
+        current_dir = ""
+        if hasattr(self, "settings_library_path_edit"):
+            current_dir = self.settings_library_path_edit.text().strip()
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择默认书库目录",
+            current_dir or self.default_library_dir or self.default_download_dir,
+        )
+        if directory:
+            self.apply_library_directory(directory, persist=False)
 
     def open_folder(self, folder_path):
         target_path = Path(str(folder_path or "").strip()).expanduser()
@@ -1323,6 +1567,7 @@ class ComicDownloaderQtWindow(QMainWindow):
 
     def update_supported_sites_summary(self):
         self.comic_dl_supported_sites_text.setPlainText(self.comic_dl_downloader.get_supported_sites_summary())
+        self.refresh_home_dashboard()
 
     def update_comic_dl_site_status(self):
         url = self.comic_dl_url_edit.text().strip()
@@ -1353,7 +1598,7 @@ class ComicDownloaderQtWindow(QMainWindow):
     def browse_comic_dl_save_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "选择保存目录", self.comic_dl_save_dir_edit.text().strip())
         if directory:
-            self.comic_dl_save_dir_edit.setText(directory)
+            self.apply_download_directory(directory, persist=True)
 
     def fetch_comic_info(self):
         url = self.comic_dl_url_edit.text().strip()
@@ -1795,8 +2040,7 @@ class ComicDownloaderQtWindow(QMainWindow):
     def browse_getcomics_save_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "选择保存目录", self.getcomics_save_dir_edit.text().strip())
         if directory:
-            self.getcomics_save_dir_edit.setText(directory)
-            self.persist_gui_state_snapshot()
+            self.apply_download_directory(directory, persist=True)
 
     def remember_getcomics_search(self):
         self.getcomics_recent_searches = upsert_recent_getcomics_search(
@@ -2263,6 +2507,7 @@ class ComicDownloaderQtWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "选择漫画目录", self.reader_source_edit.text().strip() or self.default_getcomics_save_dir)
         if not directory:
             return
+        self.apply_library_directory(directory, persist=False)
         self.refresh_reader_library(initial_path=directory)
         self.persist_gui_state_snapshot()
 
@@ -2276,16 +2521,17 @@ class ComicDownloaderQtWindow(QMainWindow):
         if not file_path:
             return
         if self.show_comic_source_support_message(file_path, "打开"):
-            self.reader_source_edit.setText(file_path)
+            self.apply_library_directory(file_path, persist=False)
             self.reset_reader_session("当前文件需要额外支持，详情见上方提示。")
             self.persist_gui_state_snapshot()
             return
+        self.apply_library_directory(file_path, persist=False)
         self.refresh_reader_library(initial_path=file_path)
         self.persist_gui_state_snapshot()
 
     def refresh_reader_library(self, initial_path=None, select_first=True):
         if initial_path is not None:
-            self.reader_source_edit.setText(str(initial_path))
+            self.apply_library_directory(initial_path, persist=False)
         source_path = self.reader_source_edit.text().strip()
         if not source_path:
             self.reader_library_list.clear()

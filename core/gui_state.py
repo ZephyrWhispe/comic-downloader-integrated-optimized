@@ -226,6 +226,8 @@ def normalize_gui_state(payload, default_save_dir=""):
         fallback=DEFAULT_RENAME_API_MODEL,
     )
     rename_api_timeout = normalize_rename_api_timeout(settings.get("rename_api_timeout"))
+    download_dir = normalize_reader_path_value(settings.get("download_dir"), fallback=save_dir)
+    library_dir = normalize_reader_path_value(settings.get("library_dir"), fallback=reader_source_path)
 
     if last_results and last_page <= 0:
         last_page = 1
@@ -270,6 +272,8 @@ def normalize_gui_state(payload, default_save_dir=""):
         "settings": {
             "appearance_mode": appearance_mode,
             "reader_windows_fullscreen_mode": reader_windows_fullscreen_mode,
+            "download_dir": download_dir,
+            "library_dir": library_dir,
             "rename_api_key": rename_api_key,
             "rename_api_url": rename_api_url,
             "rename_api_model": rename_api_model,
