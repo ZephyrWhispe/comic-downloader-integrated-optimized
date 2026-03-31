@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import threading
 import queue
+import time
 import requests
 import asyncio
 import webbrowser
@@ -15,17 +16,24 @@ except ModuleNotFoundError as exc:
     raise ModuleNotFoundError("Missing GUI dependency 'customtkinter'. Run install.bat first.") from exc
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk
 except ModuleNotFoundError as exc:
     raise ModuleNotFoundError("Missing GUI dependency 'Pillow'. Run install.bat first.") from exc
 
 # 导入下载器模块
 from .comic_downloader import ComicDownloader
 from .comic_reader import (
+    DEFAULT_READER_ZOOM_MODE,
+    get_comic_source_requirement_message,
+    get_format_support_notice_lines,
+    get_optional_comic_support_status,
+    calculate_reader_image_size,
+    clamp_reader_zoom_percent,
     discover_comics,
     format_bytes,
     list_comic_pages,
     load_comic_page_image,
+    normalize_reader_zoom_mode,
 )
 from .getinfo import GetComics
 from .download import download_comics
@@ -36,22 +44,25 @@ from .getcomics_gui_helpers import (
     upsert_getcomics_results,
 )
 from .gui_state import (
+    DEFAULT_APPEARANCE_MODE,
     DEFAULT_GETCOMICS_RESULTS,
+    DEFAULT_RENAME_API_MODEL,
+    DEFAULT_RENAME_API_TIMEOUT,
+    DEFAULT_RENAME_API_URL,
+    DEFAULT_WINDOWS_READER_FULLSCREEN_MODE,
     build_getcomics_history_label,
     load_gui_state,
     load_getcomics_favorites_file,
     normalize_cached_getcomics_results,
+    normalize_reader_scroll_fraction,
     save_getcomics_favorites_file,
     save_gui_state,
     upsert_recent_getcomics_search,
 )
-from .logger import main_logger, setup_gui_logging
+from .logger import log_filename, main_logger, setup_gui_logging
 
 # DeepSeek API配置
-DEFAULT_DEEPSEEK_API_KEY = "sk-40f91a96560c4b91a78b88091b3a07ea"
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", DEFAULT_DEEPSEEK_API_KEY).strip()
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_TIMEOUT = 20
+ENV_DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
 # 设置 customtkinter 主题
 ctk.set_appearance_mode("Dark")  # Modes: "System" (standard), "Dark", "Light"
@@ -64,6 +75,32 @@ CHAPTER_FAILURE_POLICY_LABELS = {
 CHAPTER_FAILURE_POLICY_VALUES = {
     label: value for value, label in CHAPTER_FAILURE_POLICY_LABELS.items()
 }
+READER_ZOOM_MODE_LABELS = {
+    "fit_window": "适应窗口",
+    "fit_width": "适应宽度",
+    "manual": "自定义缩放",
+}
+READER_ZOOM_MODE_VALUES = {
+    label: value for value, label in READER_ZOOM_MODE_LABELS.items()
+}
+WINDOWS_READER_FULLSCREEN_MODE_LABELS = {
+    "smooth": "顺滑全屏（推荐）",
+    "exclusive": "真全屏（隐藏任务栏）",
+}
+WINDOWS_READER_FULLSCREEN_MODE_VALUES = {
+    label: value for value, label in WINDOWS_READER_FULLSCREEN_MODE_LABELS.items()
+}
+READER_ZOOM_STEP = 10
+SUPPORT_NOTICE_COLOR = "#d0b26f"
+QUEUE_BATCH_LIMIT = 200
+QUEUE_EMPTY_POLL_MS = 120
+QUEUE_BUSY_POLL_MS = 25
+QUEUE_PROGRESS_MIN_INTERVAL = 0.08
+QUEUE_PROGRESS_MIN_DELTA = 0.4
+READER_PREVIEW_REFRESH_DELAY_MS = 90
+READER_FULLSCREEN_TRANSITION_DELAY_MS = 220
+READER_SMOOTH_FULLSCREEN_TRANSITION_DELAY_MS = 140
+READER_EXCLUSIVE_FULLSCREEN_TRANSITION_DELAY_MS = 280
 
 class ComicDownloaderGUI(ctk.CTk):
     def __init__(self):
@@ -71,7 +108,8 @@ class ComicDownloaderGUI(ctk.CTk):
 
         # 窗口基本设置
         self.title("漫画下载器整合版 - Modern UI")
-        self.geometry("1100x700")
+        self.geometry("1280x820")
+        self.minsize(1120, 720)
         
         # 下载器实例
         self.comic_dl_downloader = ComicDownloader()
@@ -81,6 +119,28 @@ class ComicDownloaderGUI(ctk.CTk):
         self.default_getcomics_save_dir = os.path.join(os.path.expanduser("~"), "Documents", "Comics")
         self.gui_state_path = Path(__file__).resolve().parent.parent / ".gui_state.json"
         self.gui_state = load_gui_state(self.gui_state_path, default_save_dir=self.default_getcomics_save_dir)
+        settings_state = self.gui_state.get("settings", {})
+        self.appearance_mode = str(
+            settings_state.get("appearance_mode", DEFAULT_APPEARANCE_MODE)
+        ).strip() or DEFAULT_APPEARANCE_MODE
+        self.reader_windows_fullscreen_mode = str(
+            settings_state.get(
+                "reader_windows_fullscreen_mode",
+                DEFAULT_WINDOWS_READER_FULLSCREEN_MODE,
+            )
+        ).strip() or DEFAULT_WINDOWS_READER_FULLSCREEN_MODE
+        self.rename_api_key = str(settings_state.get("rename_api_key", "") or "").strip()
+        self.rename_api_url = str(
+            settings_state.get("rename_api_url", DEFAULT_RENAME_API_URL) or DEFAULT_RENAME_API_URL
+        ).strip() or DEFAULT_RENAME_API_URL
+        self.rename_api_model = str(
+            settings_state.get("rename_api_model", DEFAULT_RENAME_API_MODEL) or DEFAULT_RENAME_API_MODEL
+        ).strip() or DEFAULT_RENAME_API_MODEL
+        self.rename_api_timeout = int(
+            settings_state.get("rename_api_timeout", DEFAULT_RENAME_API_TIMEOUT)
+            or DEFAULT_RENAME_API_TIMEOUT
+        )
+        ctk.set_appearance_mode(self.appearance_mode)
         self.getcomics_recent_searches = list(self.gui_state["getcomics"]["recent_searches"])
         self.getcomics_favorites = [
             (item["url"], item["title"])
@@ -101,8 +161,38 @@ class ComicDownloaderGUI(ctk.CTk):
         self.reader_current_pages = []
         self.reader_current_page_index = -1
         self.reader_source_image = None
-        self.reader_preview_image = None
+        self.reader_preview_photo = None
+        self.reader_preview_canvas_image_id = None
+        self.reader_preview_placeholder = "从左侧选择漫画后即可在这里翻页阅读"
+        self.reader_preview_render_key = None
+        reader_state = self.gui_state.get("reader", {})
+        self.reader_zoom_mode = normalize_reader_zoom_mode(
+            reader_state.get("zoom_mode", DEFAULT_READER_ZOOM_MODE)
+        )
+        self.reader_zoom_percent = clamp_reader_zoom_percent(
+            reader_state.get("zoom_percent", 100)
+        )
+        self.reader_focus_mode = bool(reader_state.get("focus_mode", False))
+        self.reader_fullscreen_mode = False
+        self.reader_focus_mode_before_fullscreen = self.reader_focus_mode
+        self.reader_window_state_before_fullscreen = None
+        self.reader_window_geometry_before_fullscreen = ""
+        self.reader_preview_refresh_after_id = None
+        self.reader_pending_preview_refresh = None
+        self.reader_fullscreen_transition_after_id = None
+        self.reader_fullscreen_transition_in_progress = False
+        self.reader_scroll_positions = {}
+        active_reader_path = str(reader_state.get("active_path") or "").strip()
+        active_reader_page = max(0, int(reader_state.get("active_page", 0) or 0))
+        if active_reader_path and active_reader_page > 0:
+            self.reader_scroll_positions[(active_reader_path, active_reader_page - 1)] = (
+                normalize_reader_scroll_fraction(reader_state.get("scroll_x")),
+                normalize_reader_scroll_fraction(reader_state.get("scroll_y")),
+            )
         self.queue_check_after_id = None
+        self.queue_throttle_lock = threading.Lock()
+        self._queued_progress_state = {"timestamp": 0.0, "value": None}
+        self._queued_info_state = {}
         
         # 队列用于线程间通信
         self.queue = queue.Queue()
@@ -117,7 +207,7 @@ class ComicDownloaderGUI(ctk.CTk):
         # ========== 侧边栏 (Sidebar) ==========
         self.sidebar_frame = ctk.CTkFrame(self, width=140, corner_radius=0)
         self.sidebar_frame.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(7, weight=1)
+        self.sidebar_frame.grid_rowconfigure(9, weight=1)
         
         self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="漫画下载器", font=ctk.CTkFont(size=20, weight="bold"))
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
@@ -139,30 +229,140 @@ class ComicDownloaderGUI(ctk.CTk):
         
         self.sidebar_button_6 = ctk.CTkButton(self.sidebar_frame, text="漫画阅读器", command=lambda: self.select_frame_by_name("reader"))
         self.sidebar_button_6.grid(row=6, column=0, padx=20, pady=10)
-        
+
+        self.sidebar_button_7 = ctk.CTkButton(self.sidebar_frame, text="运行日志", command=lambda: self.select_frame_by_name("logs"))
+        self.sidebar_button_7.grid(row=7, column=0, padx=20, pady=10)
+
+        self.sidebar_button_8 = ctk.CTkButton(self.sidebar_frame, text="设置", command=lambda: self.select_frame_by_name("settings"))
+        self.sidebar_button_8.grid(row=8, column=0, padx=20, pady=10)
+
         self.appearance_mode_label = ctk.CTkLabel(self.sidebar_frame, text="外观模式:", anchor="w")
-        self.appearance_mode_label.grid(row=8, column=0, padx=20, pady=(10, 0))
+        self.appearance_mode_label.grid(row=10, column=0, padx=20, pady=(10, 0))
         self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Light", "Dark", "System"],
                                                                        command=self.change_appearance_mode_event)
-        self.appearance_mode_optionemenu.grid(row=9, column=0, padx=20, pady=(10, 20))
-        self.appearance_mode_optionemenu.set("Dark")
+        self.appearance_mode_optionemenu.grid(row=11, column=0, padx=20, pady=(10, 20))
+        self.appearance_mode_optionemenu.set(self.appearance_mode)
 
         # ========== 内容区域 (Content Frames) ==========
         # 1. 主菜单 (Home)
         self.home_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.home_frame.grid_columnconfigure((0, 1), weight=1)
+        self.home_frame.grid_rowconfigure(5, weight=1)
         
         self.home_title = ctk.CTkLabel(self.home_frame, text="漫画下载器整合版", font=ctk.CTkFont(size=28, weight="bold"))
-        self.home_title.grid(row=0, column=0, columnspan=2, padx=20, pady=(40, 20))
+        self.home_title.grid(row=0, column=0, columnspan=2, padx=20, pady=(32, 12))
         
-        self.home_subtitle = ctk.CTkLabel(self.home_frame, text="选择左侧菜单开始使用您的下载任务", font=ctk.CTkFont(size=16))
-        self.home_subtitle.grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 40))
+        self.home_subtitle = ctk.CTkLabel(
+            self.home_frame,
+            text="把在线下载、本地整理、格式转换和阅读放到同一个界面里，减少来回切工具的打断感。",
+            font=ctk.CTkFont(size=16),
+        )
+        self.home_subtitle.grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 18))
+
+        self.home_intro_frame = ctk.CTkFrame(
+            self.home_frame,
+            corner_radius=18,
+            border_width=1,
+            border_color="#325a78",
+        )
+        self.home_intro_frame.grid(row=2, column=0, columnspan=2, padx=20, pady=(0, 8), sticky="ew")
+        self.home_intro_frame.grid_columnconfigure(0, weight=1)
+
+        self.home_intro_title = ctk.CTkLabel(
+            self.home_intro_frame,
+            text="一站式漫画工作流",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            anchor="w",
+        )
+        self.home_intro_title.grid(row=0, column=0, padx=20, pady=(18, 8), sticky="ew")
+
+        self.home_intro_desc = ctk.CTkLabel(
+            self.home_intro_frame,
+            text=(
+                "推荐流程：在线下载 -> 转换为 CBZ -> 进入阅读空间 -> AI 统一命名\n"
+                "支持图片文件夹、CBZ/ZIP、PDF、7z，以及安装外部解包工具后的 CBR/RAR。"
+            ),
+            justify="left",
+            anchor="w",
+            font=ctk.CTkFont(size=13),
+        )
+        self.home_intro_desc.grid(row=1, column=0, padx=20, pady=(0, 12), sticky="ew")
+
+        self.home_quick_actions = ctk.CTkFrame(self.home_intro_frame, fg_color="transparent")
+        self.home_quick_actions.grid(row=2, column=0, padx=20, pady=(0, 18), sticky="ew")
+        self.home_quick_actions.grid_columnconfigure((0, 1, 2), weight=1)
+
+        ctk.CTkButton(
+            self.home_quick_actions,
+            text="开始抓取漫画",
+            command=lambda: self.select_frame_by_name("comic_dl"),
+        ).grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        ctk.CTkButton(
+            self.home_quick_actions,
+            text="搜索 GetComics",
+            command=lambda: self.select_frame_by_name("getcomics"),
+        ).grid(row=0, column=1, padx=8, sticky="ew")
+        ctk.CTkButton(
+            self.home_quick_actions,
+            text="进入阅读空间",
+            command=lambda: self.select_frame_by_name("reader"),
+        ).grid(row=0, column=2, padx=(8, 0), sticky="ew")
 
         # 功能卡片
-        self.card_1 = self.create_feature_card(self.home_frame, "Comic-DL 下载", "支持多种在线漫画网站的爬取和下载，\n包括章节选择和图片自动打包。", 2, 0)
-        self.card_2 = self.create_feature_card(self.home_frame, "GetComics 下载", "强大的搜索功能，支持在 GetComics \n上查找并下载美漫，集成 aria2c 加速。", 2, 1)
-        self.card_3 = self.create_feature_card(self.home_frame, "转换为 CBZ", "将本地图片文件夹或 ZIP 压缩包\n一键转换为标准的 CBZ 漫画格式。", 3, 0)
-        self.card_4 = self.create_feature_card(self.home_frame, "AI 漫画重命名", "利用 DeepSeek AI 智能分析文件名，\n将混乱的文件重构为标准的标题和期号。", 3, 1)
+        self.card_1 = self.create_feature_card(
+            self.home_frame,
+            "Comic-DL 下载",
+            "支持多种在线漫画网站的爬取和下载，\n包括章节选择和图片自动打包。",
+            3,
+            0,
+            button_text="开始抓取",
+            command=lambda: self.select_frame_by_name("comic_dl"),
+        )
+        self.card_2 = self.create_feature_card(
+            self.home_frame,
+            "GetComics 下载",
+            "适合搜索和下载美漫，支持分页结果、收藏、队列和 aria2c 加速。",
+            3,
+            1,
+            button_text="去搜索",
+            command=lambda: self.select_frame_by_name("getcomics"),
+        )
+        self.card_3 = self.create_feature_card(
+            self.home_frame,
+            "转换为 CBZ",
+            "将图片文件夹、ZIP、PDF、7z 以及配置工具后的 CBR/RAR 转成标准 CBZ。",
+            4,
+            0,
+            button_text="开始转换",
+            command=lambda: self.select_frame_by_name("convert"),
+        )
+        self.card_4 = self.create_feature_card(
+            self.home_frame,
+            "漫画阅读器",
+            "独立阅读标签页，支持翻页、缩放、适应宽度和专注阅读模式。",
+            4,
+            1,
+            button_text="打开阅读",
+            command=lambda: self.select_frame_by_name("reader"),
+        )
+        self.card_5 = self.create_feature_card(
+            self.home_frame,
+            "AI 漫画重命名",
+            "利用 DeepSeek AI 智能分析文件名，统一标题、卷号、期号和命名结构。",
+            5,
+            0,
+            button_text="整理文件",
+            command=lambda: self.select_frame_by_name("rename"),
+        )
+        self.card_6 = self.create_feature_card(
+            self.home_frame,
+            "运行日志与维护",
+            "下载状态、详细日志和最近错误会集中到独立日志标签页，方便排查问题和反馈维护。",
+            5,
+            1,
+            button_text="查看日志",
+            command=lambda: self.select_frame_by_name("logs"),
+        )
         
         # 2. Comic-DL 下载
         self.comic_dl_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -181,36 +381,11 @@ class ComicDownloaderGUI(ctk.CTk):
         self.setup_rename_frame()
         self.reader_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.setup_reader_frame()
+        self.logs_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.setup_logs_frame()
+        self.settings_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.setup_settings_frame()
         self.restore_getcomics_state()
-
-        # ========== 底部进度和日志 (Bottom Panel) ==========
-        self.bottom_frame = ctk.CTkFrame(self, height=200, corner_radius=10)
-        # 初始不显示 grid
-        self.bottom_frame.grid_columnconfigure(0, weight=1)
-        self.bottom_frame.grid_rowconfigure(2, weight=1)
-        
-        self.status_label = ctk.CTkLabel(self.bottom_frame, text="准备就绪", anchor="w")
-        self.status_label.grid(row=0, column=0, padx=20, pady=(10, 0), sticky="ew")
-        
-        self.open_folder_button = ctk.CTkButton(self.bottom_frame, text="打开当前目录", command=self.open_current_download_folder, width=120, height=24)
-        self.open_folder_button.grid(row=0, column=1, padx=20, pady=(10, 0))
-        
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ctk.CTkProgressBar(self.bottom_frame)
-        self.progress_bar.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        self.progress_bar.set(0)
-        
-        self.percent_label = ctk.CTkLabel(self.bottom_frame, text="0%")
-        self.percent_label.grid(row=1, column=1, padx=(0, 20), pady=10)
-        
-        self.log_textbox = ctk.CTkTextbox(self.bottom_frame, height=120)
-        self.log_textbox.grid(row=2, column=0, columnspan=2, padx=20, pady=(0, 10), sticky="nsew")
-        self.log_textbox.configure(state="disabled")
-        
-        # 添加右键菜单 (Tkinter 原生菜单)
-        self.log_menu = tk.Menu(self.log_textbox, tearoff=0)
-        self.log_menu.add_command(label="清空日志", command=self.clear_logs)
-        self.log_textbox.bind("<Button-3>", self.show_log_menu)
 
         # 默认显示 Home
         self.select_frame_by_name("home")
@@ -229,6 +404,8 @@ class ComicDownloaderGUI(ctk.CTk):
         self.bind("<End>", lambda event: self.handle_reader_shortcut("last"))
         self.bind("<Left>", lambda event: self.handle_reader_shortcut("prev"))
         self.bind("<Right>", lambda event: self.handle_reader_shortcut("next"))
+        self.bind("<F11>", lambda event: self.handle_reader_shortcut("toggle_fullscreen"))
+        self.bind("<Escape>", lambda event: self.handle_reader_shortcut("escape"))
         self.restore_reader_state()
         
         # 定期检查队列
@@ -236,7 +413,7 @@ class ComicDownloaderGUI(ctk.CTk):
         
         # 初始日志
         main_logger.info("现代版 GUI 已经启动，基于 CustomTkinter")
-        self.log("提示: 下载过程中可以在下方实时看到进度和日志")
+        self.log("提示: 下载状态和详细日志已移到“运行日志”标签页，方便维护和查看报错。")
         if self.getcomics_results_restored_from_cache and self.getcomics_results_data:
             self.log(f"已恢复上次 GetComics 缓存结果，共 {len(self.getcomics_results_data)} 项；重新搜索后可继续翻页")
 
@@ -629,7 +806,7 @@ class ComicDownloaderGUI(ctk.CTk):
         group.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
         group.grid_columnconfigure(1, weight=1)
         
-        ctk.CTkLabel(group, text="输入路径 (文件夹/ZIP):").grid(row=0, column=0, padx=10, pady=10)
+        ctk.CTkLabel(group, text="输入路径 (文件夹/CBZ/ZIP/CBR/RAR/PDF/CB7/7z):").grid(row=0, column=0, padx=10, pady=10)
         self.convert_input_entry = ctk.CTkEntry(group)
         self.convert_input_entry.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
         ctk.CTkButton(group, text="浏览", command=self.browse_convert_input, width=80).grid(row=0, column=2, padx=10, pady=10)
@@ -642,6 +819,15 @@ class ComicDownloaderGUI(ctk.CTk):
         
         self.convert_button = ctk.CTkButton(group, text="开始转换", command=self.start_convert, width=200, height=40)
         self.convert_button.grid(row=2, column=0, columnspan=3, padx=10, pady=20)
+        self.convert_support_label = ctk.CTkLabel(
+            group,
+            text=self.build_format_support_notice_text("convert"),
+            justify="left",
+            anchor="w",
+            wraplength=760,
+            text_color=SUPPORT_NOTICE_COLOR,
+        )
+        self.convert_support_label.grid(row=3, column=0, columnspan=4, padx=10, pady=(0, 10), sticky="ew")
 
     def setup_rename_frame(self):
         self.rename_frame.grid_columnconfigure(1, weight=1)
@@ -665,7 +851,23 @@ class ComicDownloaderGUI(ctk.CTk):
         self.rename_prompt_text = ctk.CTkTextbox(left_ctrl, height=100)
         self.rename_prompt_text.pack(padx=10, pady=5, fill="x")
         self.rename_prompt_text.insert("1.0", "你是一个漫画文件名分析专家，擅长识别美漫的标题、期号和年份。请将输入的文件名分析为标准格式：'漫画标题 #期号 (年份).扩展名'。只返回分析后的文件名，不要包含其他内容。")
-        
+
+        rename_api_hint_frame = ctk.CTkFrame(left_ctrl, fg_color="transparent")
+        rename_api_hint_frame.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(
+            rename_api_hint_frame,
+            text="AI 接口 Key、地址和模型请到“设置”页配置。",
+            justify="left",
+            anchor="w",
+            wraplength=210,
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            rename_api_hint_frame,
+            text="打开设置",
+            width=82,
+            command=self.open_settings_for_api,
+        ).pack(side="right", padx=(8, 0))
+
         self.rename_include_folder = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(left_ctrl, text="包含文件夹名作为参考", variable=self.rename_include_folder).pack(padx=10, pady=10, anchor="w")
         
@@ -698,12 +900,73 @@ class ComicDownloaderGUI(ctk.CTk):
 
     def setup_reader_frame(self):
         self.reader_frame.grid_columnconfigure(1, weight=1)
-        self.reader_frame.grid_rowconfigure(0, weight=1)
+        self.reader_frame.grid_rowconfigure(1, weight=1)
 
-        left_panel = ctk.CTkFrame(self.reader_frame, width=320)
-        left_panel.grid(row=0, column=0, padx=(20, 10), pady=20, sticky="nsew")
+        self.reader_workspace_header = ctk.CTkFrame(
+            self.reader_frame,
+            corner_radius=16,
+            border_width=1,
+            border_color="#3d3d3d",
+        )
+        self.reader_workspace_header.grid(row=0, column=0, columnspan=2, padx=20, pady=(20, 10), sticky="ew")
+        self.reader_workspace_header.grid_columnconfigure(0, weight=1)
+
+        self.reader_workspace_title = ctk.CTkLabel(
+            self.reader_workspace_header,
+            text="漫画阅读空间",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            anchor="w",
+        )
+        self.reader_workspace_title.grid(row=0, column=0, padx=18, pady=(14, 4), sticky="ew")
+
+        self.reader_workspace_hint_label = ctk.CTkLabel(
+            self.reader_workspace_header,
+            text="阅读页已独立出来，可从左侧浏览文件并在右侧翻页。开启专注阅读后会折叠资料区，让更多空间留给漫画页面。",
+            justify="left",
+            anchor="w",
+            wraplength=860,
+        )
+        self.reader_workspace_hint_label.grid(row=1, column=0, padx=18, pady=(0, 10), sticky="ew")
+
+        self.reader_header_actions = ctk.CTkFrame(self.reader_workspace_header, fg_color="transparent")
+        self.reader_header_actions.grid(row=0, column=1, rowspan=2, padx=(12, 18), pady=14, sticky="e")
+        self.reader_header_actions.grid_columnconfigure((0, 1, 2, 3), weight=1)
+
+        ctk.CTkButton(
+            self.reader_header_actions,
+            text="浏览目录",
+            width=100,
+            command=self.browse_reader_library_dir,
+        ).grid(row=0, column=0, padx=(0, 8), pady=0)
+
+        ctk.CTkButton(
+            self.reader_header_actions,
+            text="选择文件",
+            width=100,
+            command=self.browse_reader_library_file,
+        ).grid(row=0, column=1, padx=8, pady=0)
+
+        self.reader_focus_button = ctk.CTkButton(
+            self.reader_header_actions,
+            text="专注阅读",
+            width=120,
+            command=self.toggle_reader_focus_mode,
+        )
+        self.reader_focus_button.grid(row=0, column=2, padx=(8, 0), pady=0)
+
+        self.reader_fullscreen_button = ctk.CTkButton(
+            self.reader_header_actions,
+            text="全屏阅读",
+            width=120,
+            command=self.toggle_reader_fullscreen_mode,
+        )
+        self.reader_fullscreen_button.grid(row=0, column=3, padx=(8, 0), pady=0)
+
+        left_panel = ctk.CTkFrame(self.reader_frame, width=280)
+        left_panel.grid(row=1, column=0, padx=(20, 10), pady=(0, 20), sticky="nsew")
         left_panel.grid_columnconfigure(0, weight=1)
         left_panel.grid_rowconfigure(4, weight=1)
+        self.reader_sidebar_frame = left_panel
 
         ctk.CTkLabel(
             left_panel,
@@ -713,7 +976,7 @@ class ComicDownloaderGUI(ctk.CTk):
 
         self.reader_source_entry = ctk.CTkEntry(
             left_panel,
-            placeholder_text="选择漫画目录或单个 CBZ/ZIP 文件",
+            placeholder_text="选择漫画目录或单个 CBZ/ZIP/CBR/RAR/7z/PDF 文件",
         )
         self.reader_source_entry.grid(row=1, column=0, padx=15, pady=(0, 10), sticky="ew")
         self.reader_source_entry.insert(0, self.default_getcomics_save_dir)
@@ -738,6 +1001,16 @@ class ComicDownloaderGUI(ctk.CTk):
             text="刷新列表",
             command=self.refresh_reader_library,
         ).grid(row=0, column=2, padx=(5, 0), pady=0, sticky="ew")
+
+        self.reader_support_label = ctk.CTkLabel(
+            left_panel,
+            text=self.build_format_support_notice_text("reader"),
+            justify="left",
+            anchor="w",
+            wraplength=250,
+            text_color=SUPPORT_NOTICE_COLOR,
+        )
+        self.reader_support_label.grid(row=3, column=0, padx=15, pady=(0, 10), sticky="ew")
 
         self.reader_listbox = tk.Listbox(
             left_panel,
@@ -781,9 +1054,10 @@ class ComicDownloaderGUI(ctk.CTk):
         self.reader_open_folder_button.grid(row=6, column=0, padx=15, pady=(0, 15), sticky="ew")
 
         right_panel = ctk.CTkFrame(self.reader_frame)
-        right_panel.grid(row=0, column=1, padx=(10, 20), pady=20, sticky="nsew")
+        right_panel.grid(row=1, column=1, padx=(10, 20), pady=(0, 20), sticky="nsew")
         right_panel.grid_columnconfigure(0, weight=1)
         right_panel.grid_rowconfigure(2, weight=1)
+        self.reader_content_frame = right_panel
 
         self.reader_title_label = ctk.CTkLabel(
             right_panel,
@@ -793,23 +1067,103 @@ class ComicDownloaderGUI(ctk.CTk):
         )
         self.reader_title_label.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="ew")
 
-        self.reader_info_textbox = ctk.CTkTextbox(right_panel, height=110)
+        self.reader_info_textbox = ctk.CTkTextbox(right_panel, height=82)
         self.reader_info_textbox.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
         self.reader_info_textbox.configure(state="disabled")
 
         preview_frame = ctk.CTkFrame(right_panel)
         preview_frame.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="nsew")
         preview_frame.grid_columnconfigure(0, weight=1)
-        preview_frame.grid_rowconfigure(0, weight=1)
+        preview_frame.grid_rowconfigure(1, weight=1)
 
-        self.reader_preview_label = ctk.CTkLabel(
-            preview_frame,
-            text="从左侧选择漫画后即可在这里翻页阅读",
-            anchor="center",
-            justify="center",
+        reader_zoom_toolbar = ctk.CTkFrame(preview_frame, fg_color="transparent")
+        reader_zoom_toolbar.grid(row=0, column=0, padx=10, pady=(10, 0), sticky="ew")
+        reader_zoom_toolbar.grid_columnconfigure(5, weight=1)
+
+        ctk.CTkLabel(reader_zoom_toolbar, text="缩放").grid(row=0, column=0, padx=(0, 8), pady=0)
+        self.reader_zoom_out_button = ctk.CTkButton(
+            reader_zoom_toolbar,
+            text="-",
+            width=36,
+            command=lambda: self.adjust_reader_zoom(-READER_ZOOM_STEP),
+            state="disabled",
         )
-        self.reader_preview_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-        self.reader_preview_label.bind("<Configure>", lambda event: self.refresh_reader_preview())
+        self.reader_zoom_out_button.grid(row=0, column=1, padx=(0, 6), pady=0)
+        self.reader_zoom_value_label = ctk.CTkLabel(
+            reader_zoom_toolbar,
+            text=f"{self.reader_zoom_percent}%",
+            width=60,
+        )
+        self.reader_zoom_value_label.grid(row=0, column=2, padx=0, pady=0)
+        self.reader_zoom_in_button = ctk.CTkButton(
+            reader_zoom_toolbar,
+            text="+",
+            width=36,
+            command=lambda: self.adjust_reader_zoom(READER_ZOOM_STEP),
+            state="disabled",
+        )
+        self.reader_zoom_in_button.grid(row=0, column=3, padx=(6, 6), pady=0)
+        self.reader_zoom_reset_button = ctk.CTkButton(
+            reader_zoom_toolbar,
+            text="100%",
+            width=60,
+            command=self.reset_reader_zoom,
+            state="disabled",
+        )
+        self.reader_zoom_reset_button.grid(row=0, column=4, padx=(0, 10), pady=0)
+        self.reader_zoom_mode_menu = ctk.CTkOptionMenu(
+            reader_zoom_toolbar,
+            values=list(READER_ZOOM_MODE_VALUES.keys()),
+            command=self.handle_reader_zoom_mode_change,
+            state="disabled",
+            width=150,
+        )
+        self.reader_zoom_mode_menu.grid(row=0, column=5, padx=0, pady=0, sticky="e")
+        self.reader_zoom_mode_menu.set(self.get_reader_zoom_mode_label(self.reader_zoom_mode))
+
+        preview_canvas_frame = ctk.CTkFrame(preview_frame)
+        preview_canvas_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        preview_canvas_frame.grid_columnconfigure(0, weight=1)
+        preview_canvas_frame.grid_rowconfigure(0, weight=1)
+
+        self.reader_preview_canvas = tk.Canvas(
+            preview_canvas_frame,
+            bg="#111111",
+            highlightthickness=0,
+            borderwidth=0,
+            xscrollincrement=1,
+            yscrollincrement=1,
+        )
+        self.reader_preview_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.reader_preview_y_scrollbar = ctk.CTkScrollbar(
+            preview_canvas_frame,
+            orientation="vertical",
+            command=self.reader_preview_canvas.yview,
+        )
+        self.reader_preview_y_scrollbar.grid(row=0, column=1, padx=(10, 0), sticky="ns")
+        self.reader_preview_x_scrollbar = ctk.CTkScrollbar(
+            preview_canvas_frame,
+            orientation="horizontal",
+            command=self.reader_preview_canvas.xview,
+        )
+        self.reader_preview_x_scrollbar.grid(row=1, column=0, pady=(10, 0), sticky="ew")
+        self.reader_preview_canvas.configure(
+            xscrollcommand=self.reader_preview_x_scrollbar.set,
+            yscrollcommand=self.reader_preview_y_scrollbar.set,
+        )
+        self.reader_preview_canvas.bind(
+            "<Configure>",
+            lambda event: self.handle_reader_preview_configure(),
+        )
+        self.reader_preview_canvas.bind("<MouseWheel>", self.handle_reader_mousewheel)
+        self.reader_preview_canvas.bind("<Shift-MouseWheel>", self.handle_reader_mousewheel)
+        self.reader_preview_canvas.bind("<Button-4>", self.handle_reader_mousewheel)
+        self.reader_preview_canvas.bind("<Button-5>", self.handle_reader_mousewheel)
+        self.reader_preview_canvas.bind(
+            "<Double-Button-1>",
+            lambda event: self.toggle_reader_fullscreen_mode(),
+        )
 
         reader_controls = ctk.CTkFrame(right_panel)
         reader_controls.grid(row=3, column=0, padx=20, pady=(0, 15), sticky="ew")
@@ -857,19 +1211,273 @@ class ComicDownloaderGUI(ctk.CTk):
         )
         self.reader_last_button.grid(row=0, column=5, padx=(5, 0), pady=0, sticky="ew")
 
-        self.set_reader_info_text("漫画列表会显示目录下的图片文件夹和 CBZ/ZIP 文件。")
+        self.set_reader_info_text("漫画列表会显示目录下的图片文件夹、CBZ/ZIP/CBR/RAR/7z/PDF 文件。")
+        self.show_reader_preview_placeholder(self.reader_preview_placeholder)
+        self.update_reader_zoom_controls()
         self.refresh_reader_library(initial_path=self.default_getcomics_save_dir, select_first=False)
+        self.set_reader_focus_mode(self.reader_focus_mode, persist=False, refresh=False)
+
+    def setup_logs_frame(self):
+        self.logs_frame.grid_columnconfigure(0, weight=1)
+        self.logs_frame.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            self.logs_frame,
+            text="运行日志与维护信息",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=20, pady=(24, 6), sticky="ew")
+
+        ctk.CTkLabel(
+            self.logs_frame,
+            text="这里集中显示任务状态、详细执行日志和错误信息，方便回看下载过程、定位异常并把日志发给维护者。",
+            justify="left",
+            anchor="w",
+        ).grid(row=1, column=0, padx=20, pady=(0, 14), sticky="ew")
+
+        logs_status_frame = ctk.CTkFrame(self.logs_frame)
+        logs_status_frame.grid(row=2, column=0, padx=20, pady=(0, 12), sticky="ew")
+        logs_status_frame.grid_columnconfigure(0, weight=1)
+
+        self.status_label = ctk.CTkLabel(logs_status_frame, text="准备就绪", anchor="w")
+        self.status_label.grid(row=0, column=0, padx=18, pady=(14, 6), sticky="ew")
+
+        self.percent_label = ctk.CTkLabel(logs_status_frame, text="0%")
+        self.percent_label.grid(row=0, column=1, padx=(0, 18), pady=(14, 6), sticky="e")
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ctk.CTkProgressBar(logs_status_frame)
+        self.progress_bar.grid(row=1, column=0, columnspan=2, padx=18, pady=(0, 10), sticky="ew")
+        self.progress_bar.set(0)
+
+        self.logs_error_title_label = ctk.CTkLabel(logs_status_frame, text="最近错误:", anchor="w")
+        self.logs_error_title_label.grid(row=2, column=0, padx=18, pady=(0, 4), sticky="w")
+        self.logs_error_value_label = ctk.CTkLabel(
+            logs_status_frame,
+            text="暂无错误",
+            justify="left",
+            anchor="w",
+            wraplength=860,
+            text_color="#d97c7c",
+        )
+        self.logs_error_value_label.grid(row=3, column=0, columnspan=2, padx=18, pady=(0, 10), sticky="ew")
+
+        self.logs_file_title_label = ctk.CTkLabel(logs_status_frame, text="日志文件:", anchor="w")
+        self.logs_file_title_label.grid(row=4, column=0, padx=18, pady=(0, 4), sticky="w")
+        self.logs_file_value_label = ctk.CTkLabel(
+            logs_status_frame,
+            text=str(Path(log_filename).resolve()),
+            justify="left",
+            anchor="w",
+            wraplength=860,
+        )
+        self.logs_file_value_label.grid(row=5, column=0, columnspan=2, padx=18, pady=(0, 14), sticky="ew")
+
+        logs_action_frame = ctk.CTkFrame(self.logs_frame, fg_color="transparent")
+        logs_action_frame.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
+        logs_action_frame.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
+
+        self.open_folder_button = ctk.CTkButton(
+            logs_action_frame,
+            text="打开当前目录",
+            command=self.open_current_download_folder,
+        )
+        self.open_folder_button.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        ctk.CTkButton(
+            logs_action_frame,
+            text="打开日志目录",
+            command=self.open_logs_folder,
+        ).grid(row=0, column=1, padx=8, sticky="ew")
+        ctk.CTkButton(
+            logs_action_frame,
+            text="打开日志文件",
+            command=self.open_log_file,
+        ).grid(row=0, column=2, padx=8, sticky="ew")
+        ctk.CTkButton(
+            logs_action_frame,
+            text="复制日志",
+            command=self.copy_logs_to_clipboard,
+        ).grid(row=0, column=3, padx=8, sticky="ew")
+        ctk.CTkButton(
+            logs_action_frame,
+            text="清空日志",
+            command=self.clear_logs,
+        ).grid(row=0, column=4, padx=(8, 0), sticky="ew")
+
+        self.log_textbox = ctk.CTkTextbox(self.logs_frame)
+        self.log_textbox.grid(row=4, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        self.log_textbox.configure(state="disabled")
+
+        self.log_menu = tk.Menu(self.log_textbox, tearoff=0)
+        self.log_menu.add_command(label="清空日志", command=self.clear_logs)
+        self.log_menu.add_command(label="复制日志", command=self.copy_logs_to_clipboard)
+        self.log_textbox.bind("<Button-3>", self.show_log_menu)
+
+    def setup_settings_frame(self):
+        self.settings_frame.grid_columnconfigure(0, weight=1)
+        self.settings_frame.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            self.settings_frame,
+            text="设置",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=20, pady=(24, 6), sticky="ew")
+
+        ctk.CTkLabel(
+            self.settings_frame,
+            text="统一管理外观、Windows 阅读器全屏方式，以及 AI 漫画重命名接口配置。",
+            justify="left",
+            anchor="w",
+        ).grid(row=1, column=0, padx=20, pady=(0, 14), sticky="ew")
+
+        display_group = ctk.CTkFrame(self.settings_frame)
+        display_group.grid(row=2, column=0, padx=20, pady=(0, 12), sticky="ew")
+        display_group.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            display_group,
+            text="界面外观",
+            font=ctk.CTkFont(weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
+        self.settings_appearance_optionemenu = ctk.CTkOptionMenu(
+            display_group,
+            values=["Light", "Dark", "System"],
+            command=self.change_appearance_mode_event,
+            width=180,
+        )
+        self.settings_appearance_optionemenu.grid(row=0, column=1, padx=16, pady=(16, 6), sticky="w")
+        self.settings_appearance_optionemenu.set(self.appearance_mode)
+
+        ctk.CTkLabel(
+            display_group,
+            text="Windows 阅读器全屏方式",
+            font=ctk.CTkFont(weight="bold"),
+            anchor="w",
+        ).grid(row=1, column=0, padx=16, pady=6, sticky="w")
+        self.settings_reader_fullscreen_optionemenu = ctk.CTkOptionMenu(
+            display_group,
+            values=list(WINDOWS_READER_FULLSCREEN_MODE_VALUES.keys()),
+            command=lambda _value: self.refresh_settings_fullscreen_hint(),
+            width=220,
+        )
+        self.settings_reader_fullscreen_optionemenu.grid(row=1, column=1, padx=16, pady=6, sticky="w")
+        self.settings_reader_fullscreen_optionemenu.set(
+            self.get_windows_reader_fullscreen_mode_label(self.reader_windows_fullscreen_mode)
+        )
+        if os.name != "nt":
+            self.settings_reader_fullscreen_optionemenu.configure(state="disabled")
+
+        self.settings_reader_fullscreen_hint_label = ctk.CTkLabel(
+            display_group,
+            text="",
+            justify="left",
+            anchor="w",
+            wraplength=860,
+        )
+        self.settings_reader_fullscreen_hint_label.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(4, 16),
+            sticky="ew",
+        )
+
+        api_group = ctk.CTkFrame(self.settings_frame)
+        api_group.grid(row=3, column=0, padx=20, pady=(0, 12), sticky="ew")
+        api_group.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            api_group,
+            text="AI 漫画重命名接口",
+            font=ctk.CTkFont(weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, padx=16, pady=(16, 8), sticky="w")
+
+        ctk.CTkLabel(api_group, text="API Key").grid(row=1, column=0, padx=16, pady=6, sticky="w")
+        self.settings_api_key_entry = ctk.CTkEntry(api_group, show="*")
+        self.settings_api_key_entry.grid(row=1, column=1, padx=16, pady=6, sticky="ew")
+        self.settings_api_key_entry.insert(0, self.rename_api_key)
+
+        self.settings_show_api_key_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            api_group,
+            text="显示 Key",
+            variable=self.settings_show_api_key_var,
+            command=self.toggle_settings_api_key_visibility,
+        ).grid(row=2, column=1, padx=16, pady=(0, 6), sticky="w")
+
+        ctk.CTkLabel(api_group, text="接口地址").grid(row=3, column=0, padx=16, pady=6, sticky="w")
+        self.settings_api_url_entry = ctk.CTkEntry(api_group)
+        self.settings_api_url_entry.grid(row=3, column=1, padx=16, pady=6, sticky="ew")
+        self.settings_api_url_entry.insert(0, self.rename_api_url)
+
+        ctk.CTkLabel(api_group, text="模型").grid(row=4, column=0, padx=16, pady=6, sticky="w")
+        self.settings_api_model_entry = ctk.CTkEntry(api_group)
+        self.settings_api_model_entry.grid(row=4, column=1, padx=16, pady=6, sticky="ew")
+        self.settings_api_model_entry.insert(0, self.rename_api_model)
+
+        ctk.CTkLabel(api_group, text="超时（秒）").grid(row=5, column=0, padx=16, pady=6, sticky="w")
+        self.settings_api_timeout_entry = ctk.CTkEntry(api_group)
+        self.settings_api_timeout_entry.grid(row=5, column=1, padx=16, pady=6, sticky="ew")
+        self.settings_api_timeout_entry.insert(0, str(self.rename_api_timeout))
+
+        self.settings_api_status_label = ctk.CTkLabel(
+            api_group,
+            text="",
+            justify="left",
+            anchor="w",
+            wraplength=860,
+        )
+        self.settings_api_status_label.grid(
+            row=6,
+            column=0,
+            columnspan=2,
+            padx=16,
+            pady=(4, 16),
+            sticky="ew",
+        )
+
+        settings_action_group = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        settings_action_group.grid(row=4, column=0, padx=20, pady=(0, 20), sticky="ew")
+        settings_action_group.grid_columnconfigure(2, weight=1)
+
+        ctk.CTkButton(
+            settings_action_group,
+            text="保存设置",
+            command=self.save_settings,
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkButton(
+            settings_action_group,
+            text="恢复默认",
+            command=self.reset_settings,
+        ).grid(row=0, column=1, padx=8, sticky="w")
+
+        self.settings_status_label = ctk.CTkLabel(
+            settings_action_group,
+            text="修改后会写入本地 .gui_state.json，AI Key 优先使用这里的设置。",
+            justify="left",
+            anchor="w",
+        )
+        self.settings_status_label.grid(row=0, column=2, padx=(12, 0), sticky="ew")
+
+        self.refresh_settings_fullscreen_hint()
+        self.refresh_settings_api_status_label()
 
     def show_progress(self):
         """显示进度和日志面板"""
-        self.bottom_frame.grid(row=1, column=1, padx=20, pady=10, sticky="nsew")
+        return None
 
     def hide_progress(self):
         """隐藏进度和日志面板"""
-        self.bottom_frame.grid_forget()
+        return None
 
     def select_frame_by_name(self, name):
         self.current_frame_name = name
+        if name != "reader" and getattr(self, "reader_fullscreen_mode", False):
+            self.set_reader_fullscreen_mode(False, refresh=False)
         # 隐藏所有 frame
         self.home_frame.grid_forget()
         self.comic_dl_frame.grid_forget()
@@ -877,28 +1485,26 @@ class ComicDownloaderGUI(ctk.CTk):
         self.convert_frame.grid_forget()
         self.rename_frame.grid_forget()
         self.reader_frame.grid_forget()
+        self.logs_frame.grid_forget()
+        self.settings_frame.grid_forget()
 
         # 显示选中的 frame
         if name == "home":
             self.home_frame.grid(row=0, column=1, sticky="nsew")
-            # 如果在首页且没有任务运行，隐藏底栏
-            if not self.is_any_task_running():
-                self.hide_progress()
         elif name == "comic_dl":
             self.comic_dl_frame.grid(row=0, column=1, sticky="nsew")
-            self.show_progress()
         elif name == "getcomics":
             self.getcomics_frame.grid(row=0, column=1, sticky="nsew")
-            self.show_progress()
         elif name == "convert":
             self.convert_frame.grid(row=0, column=1, sticky="nsew")
-            self.show_progress()
         elif name == "rename":
             self.rename_frame.grid(row=0, column=1, sticky="nsew")
-            self.show_progress()
         elif name == "reader":
             self.reader_frame.grid(row=0, column=1, sticky="nsew")
-            self.show_progress()
+        elif name == "logs":
+            self.logs_frame.grid(row=0, column=1, sticky="nsew")
+        elif name == "settings":
+            self.settings_frame.grid(row=0, column=1, sticky="nsew")
 
     def is_any_task_running(self):
         """检查是否有任何后台任务正在运行"""
@@ -907,25 +1513,780 @@ class ComicDownloaderGUI(ctk.CTk):
         return self.status_label.cget("text") != "准备就绪" and self.progress_bar.get() < 1.0
 
     def change_appearance_mode_event(self, new_appearance_mode: str):
-        ctk.set_appearance_mode(new_appearance_mode)
+        self.appearance_mode = str(new_appearance_mode or DEFAULT_APPEARANCE_MODE).strip() or DEFAULT_APPEARANCE_MODE
+        ctk.set_appearance_mode(self.appearance_mode)
+        if hasattr(self, "appearance_mode_optionemenu"):
+            self.appearance_mode_optionemenu.set(self.appearance_mode)
+        if hasattr(self, "settings_appearance_optionemenu"):
+            self.settings_appearance_optionemenu.set(self.appearance_mode)
+        self.persist_gui_state_snapshot()
 
-    def create_feature_card(self, parent, title, desc, row, col):
+    def get_windows_reader_fullscreen_mode_label(self, value):
+        return WINDOWS_READER_FULLSCREEN_MODE_LABELS.get(
+            str(value or "").strip().lower(),
+            WINDOWS_READER_FULLSCREEN_MODE_LABELS[DEFAULT_WINDOWS_READER_FULLSCREEN_MODE],
+        )
+
+    def get_windows_reader_fullscreen_mode_value(self, label):
+        return WINDOWS_READER_FULLSCREEN_MODE_VALUES.get(
+            str(label or "").strip(),
+            DEFAULT_WINDOWS_READER_FULLSCREEN_MODE,
+        )
+
+    def refresh_settings_fullscreen_hint(self):
+        if not hasattr(self, "settings_reader_fullscreen_hint_label"):
+            return
+
+        mode = self.get_windows_reader_fullscreen_mode_value(
+            self.settings_reader_fullscreen_optionemenu.get()
+            if hasattr(self, "settings_reader_fullscreen_optionemenu")
+            else self.get_windows_reader_fullscreen_mode_label(self.reader_windows_fullscreen_mode)
+        )
+        if os.name != "nt":
+            hint_text = "当前系统不是 Windows，此选项主要用于兼容保存；阅读器会继续使用标准全屏行为。"
+        elif mode == "exclusive":
+            hint_text = "真全屏会隐藏任务栏，沉浸感更强，但切换时比顺滑全屏更重一些。"
+        else:
+            hint_text = "顺滑全屏使用窗口最大化，不隐藏任务栏，切换更快，也更适合频繁进出全屏。"
+        self.settings_reader_fullscreen_hint_label.configure(text=hint_text)
+
+    def toggle_settings_api_key_visibility(self):
+        if not hasattr(self, "settings_api_key_entry"):
+            return
+        self.settings_api_key_entry.configure(
+            show="" if self.settings_show_api_key_var.get() else "*"
+        )
+
+    def refresh_settings_api_status_label(self):
+        if not hasattr(self, "settings_api_status_label"):
+            return
+
+        current_key = ""
+        if hasattr(self, "settings_api_key_entry"):
+            current_key = self.settings_api_key_entry.get().strip()
+
+        if current_key:
+            status = "当前会优先使用设置页中的 API Key。"
+        elif ENV_DEEPSEEK_API_KEY:
+            status = "设置页未填写 API Key，运行时会回退使用环境变量 DEEPSEEK_API_KEY。"
+        else:
+            status = "当前还没有可用的 API Key，使用 AI 漫画重命名前请先填写。"
+        self.settings_api_status_label.configure(text=status)
+
+    def open_settings_for_api(self):
+        self.select_frame_by_name("settings")
+        if hasattr(self, "settings_api_key_entry"):
+            self.settings_api_key_entry.focus_set()
+
+    def get_rename_api_request_settings(self):
+        api_key = self.rename_api_key.strip() or ENV_DEEPSEEK_API_KEY
+        if not api_key:
+            raise ValueError("未配置 AI 重命名 API Key，请先到“设置”页填写，或设置环境变量 DEEPSEEK_API_KEY。")
+
+        api_url = str(self.rename_api_url or DEFAULT_RENAME_API_URL).strip() or DEFAULT_RENAME_API_URL
+        api_model = str(self.rename_api_model or DEFAULT_RENAME_API_MODEL).strip() or DEFAULT_RENAME_API_MODEL
+        try:
+            api_timeout = int(self.rename_api_timeout)
+        except (TypeError, ValueError):
+            api_timeout = DEFAULT_RENAME_API_TIMEOUT
+
+        return {
+            "api_key": api_key,
+            "api_url": api_url,
+            "api_model": api_model,
+            "api_timeout": max(5, min(300, api_timeout)),
+        }
+
+    def save_settings(self, success_message="设置已保存"):
+        appearance_mode = (
+            self.settings_appearance_optionemenu.get().strip()
+            if hasattr(self, "settings_appearance_optionemenu")
+            else self.appearance_mode
+        ) or DEFAULT_APPEARANCE_MODE
+        fullscreen_mode = self.get_windows_reader_fullscreen_mode_value(
+            self.settings_reader_fullscreen_optionemenu.get()
+        )
+        api_key = self.settings_api_key_entry.get().strip()
+        api_url = self.settings_api_url_entry.get().strip() or DEFAULT_RENAME_API_URL
+        api_model = self.settings_api_model_entry.get().strip() or DEFAULT_RENAME_API_MODEL
+        timeout_text = self.settings_api_timeout_entry.get().strip()
+
+        try:
+            api_timeout = int(round(float(timeout_text or DEFAULT_RENAME_API_TIMEOUT)))
+            if api_timeout < 5 or api_timeout > 300:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("错误", "AI 接口超时必须是 5 到 300 秒之间的整数。")
+            return
+
+        previous_fullscreen_mode = self.reader_windows_fullscreen_mode
+
+        self.reader_windows_fullscreen_mode = fullscreen_mode
+        self.rename_api_key = api_key
+        self.rename_api_url = api_url
+        self.rename_api_model = api_model
+        self.rename_api_timeout = api_timeout
+        self.refresh_settings_fullscreen_hint()
+        self.refresh_settings_api_status_label()
+        self.change_appearance_mode_event(appearance_mode)
+
+        extra_note = ""
+        if self.reader_fullscreen_mode and previous_fullscreen_mode != fullscreen_mode:
+            extra_note = "，新的全屏方式会在下次进入全屏时生效"
+
+        self.settings_status_label.configure(text=f"{success_message}{extra_note}")
+        self.persist_gui_state_snapshot()
+        self.log(
+            f"已保存设置：外观 {self.appearance_mode} / Windows 全屏 {self.get_windows_reader_fullscreen_mode_label(self.reader_windows_fullscreen_mode)} / AI 模型 {self.rename_api_model}"
+        )
+
+    def reset_settings(self):
+        if hasattr(self, "settings_appearance_optionemenu"):
+            self.settings_appearance_optionemenu.set(DEFAULT_APPEARANCE_MODE)
+        if hasattr(self, "settings_reader_fullscreen_optionemenu"):
+            self.settings_reader_fullscreen_optionemenu.set(
+                self.get_windows_reader_fullscreen_mode_label(DEFAULT_WINDOWS_READER_FULLSCREEN_MODE)
+            )
+        if hasattr(self, "settings_api_key_entry"):
+            self.settings_api_key_entry.delete(0, tk.END)
+        if hasattr(self, "settings_api_url_entry"):
+            self.settings_api_url_entry.delete(0, tk.END)
+            self.settings_api_url_entry.insert(0, DEFAULT_RENAME_API_URL)
+        if hasattr(self, "settings_api_model_entry"):
+            self.settings_api_model_entry.delete(0, tk.END)
+            self.settings_api_model_entry.insert(0, DEFAULT_RENAME_API_MODEL)
+        if hasattr(self, "settings_api_timeout_entry"):
+            self.settings_api_timeout_entry.delete(0, tk.END)
+            self.settings_api_timeout_entry.insert(0, str(DEFAULT_RENAME_API_TIMEOUT))
+        if hasattr(self, "settings_show_api_key_var"):
+            self.settings_show_api_key_var.set(False)
+            self.toggle_settings_api_key_visibility()
+        self.refresh_settings_fullscreen_hint()
+        self.refresh_settings_api_status_label()
+        self.save_settings(success_message="设置已恢复默认值")
+
+    def create_feature_card(self, parent, title, desc, row, col, button_text=None, command=None):
         """创建一个首页功能介绍卡片"""
         card = ctk.CTkFrame(parent, corner_radius=15, border_width=1, border_color="#3d3d3d")
         card.grid(row=row, column=col, padx=15, pady=15, sticky="nsew")
+        card.grid_columnconfigure(0, weight=1)
         
         card_title = ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=18, weight="bold"))
         card_title.pack(padx=20, pady=(20, 10))
         
-        card_desc = ctk.CTkLabel(card, text=desc, font=ctk.CTkFont(size=13), justify="center")
-        card_desc.pack(padx=20, pady=(0, 20))
+        card_desc = ctk.CTkLabel(
+            card,
+            text=desc,
+            font=ctk.CTkFont(size=13),
+            justify="center",
+            wraplength=320,
+        )
+        card_desc.pack(padx=20, pady=(0, 14))
+
+        if command:
+            ctk.CTkButton(
+                card,
+                text=button_text or "打开功能",
+                command=command,
+            ).pack(padx=20, pady=(0, 18), fill="x")
         return card
+
+    def build_format_support_notice_text(self, context="reader"):
+        lines = get_format_support_notice_lines()
+        status = get_optional_comic_support_status()
+        prefix = "阅读支持" if context == "reader" else "转换支持"
+
+        if context == "convert":
+            lines = [line.replace("直接支持", "可转换") for line in lines]
+
+        if not status["rar"]["available"]:
+            lines.append("提示：安装 7-Zip 后，把 7z.exe 加入 PATH 通常就够用了。")
+
+        return prefix + "：" + "\n".join(lines)
+
+    def refresh_format_support_labels(self):
+        if hasattr(self, "reader_support_label"):
+            self.reader_support_label.configure(text=self.build_format_support_notice_text("reader"))
+        if hasattr(self, "convert_support_label"):
+            self.convert_support_label.configure(text=self.build_format_support_notice_text("convert"))
+
+    def show_comic_source_support_message(self, source_path, action):
+        support_message = get_comic_source_requirement_message(source_path, action=action)
+        if support_message:
+            messagebox.showinfo("需要额外支持", support_message)
+            return True
+        return False
+
+    def get_reader_zoom_mode_label(self, value):
+        normalized_mode = normalize_reader_zoom_mode(value)
+        return READER_ZOOM_MODE_LABELS.get(
+            normalized_mode,
+            READER_ZOOM_MODE_LABELS[DEFAULT_READER_ZOOM_MODE],
+        )
+
+    def get_reader_zoom_mode_value(self, label):
+        return READER_ZOOM_MODE_VALUES.get(
+            str(label or "").strip(),
+            DEFAULT_READER_ZOOM_MODE,
+        )
+
+    def get_reader_preview_viewport_size(self):
+        canvas = getattr(self, "reader_preview_canvas", None)
+        if canvas is None:
+            return 240, 240
+
+        canvas_width = canvas.winfo_width() - 4
+        canvas_height = canvas.winfo_height() - 4
+        if canvas_width <= 1:
+            canvas_width = 240
+        if canvas_height <= 1:
+            canvas_height = 240
+
+        return (
+            max(canvas_width, 1),
+            max(canvas_height, 1),
+        )
+
+    def get_reader_effective_zoom_percent(self, viewport_size=None):
+        if self.reader_source_image is None:
+            return clamp_reader_zoom_percent(self.reader_zoom_percent)
+
+        if viewport_size is None:
+            viewport_size = self.get_reader_preview_viewport_size()
+
+        target_width, _ = calculate_reader_image_size(
+            self.reader_source_image.size,
+            viewport_size,
+            zoom_mode=self.reader_zoom_mode,
+            zoom_percent=self.reader_zoom_percent,
+        )
+        source_width = max(self.reader_source_image.size[0], 1)
+        return max(1, int(round((target_width / source_width) * 100)))
+
+    def get_reader_scroll_key(self, entry=None, page_index=None):
+        target_entry = entry if entry is not None else self.reader_current_entry
+        target_page_index = self.reader_current_page_index if page_index is None else int(page_index)
+        if not target_entry or target_page_index < 0:
+            return None
+        return (target_entry["path"], target_page_index)
+
+    def get_reader_canvas_scroll_position(self):
+        canvas = getattr(self, "reader_preview_canvas", None)
+        if canvas is None:
+            return (0.0, 0.0)
+
+        try:
+            x_start = normalize_reader_scroll_fraction(canvas.xview()[0])
+        except (IndexError, tk.TclError, ValueError, TypeError):
+            x_start = 0.0
+        try:
+            y_start = normalize_reader_scroll_fraction(canvas.yview()[0])
+        except (IndexError, tk.TclError, ValueError, TypeError):
+            y_start = 0.0
+        return (x_start, y_start)
+
+    def get_reader_saved_scroll_position(self, entry=None, page_index=None):
+        scroll_key = self.get_reader_scroll_key(entry=entry, page_index=page_index)
+        if scroll_key is None:
+            return (0.0, 0.0)
+        return self.reader_scroll_positions.get(scroll_key, (0.0, 0.0))
+
+    def store_current_reader_scroll_position(self):
+        scroll_key = self.get_reader_scroll_key()
+        if scroll_key is None:
+            return (0.0, 0.0)
+
+        scroll_position = self.get_reader_canvas_scroll_position()
+        self.reader_scroll_positions[scroll_key] = scroll_position
+        return scroll_position
+
+    def apply_reader_scroll_position(self, scroll_position):
+        canvas = getattr(self, "reader_preview_canvas", None)
+        if canvas is None:
+            return
+
+        scroll_x, scroll_y = scroll_position or (0.0, 0.0)
+        canvas.xview_moveto(normalize_reader_scroll_fraction(scroll_x))
+        canvas.yview_moveto(normalize_reader_scroll_fraction(scroll_y))
+
+    def can_reader_scroll_vertically(self, direction):
+        canvas = getattr(self, "reader_preview_canvas", None)
+        if canvas is None:
+            return False
+
+        try:
+            start, end = canvas.yview()
+        except tk.TclError:
+            return False
+
+        if direction < 0:
+            return start > 0.001
+        if direction > 0:
+            return end < 0.999
+        return False
+
+    def scroll_reader_preview_vertically(self, direction, steps=1):
+        canvas = getattr(self, "reader_preview_canvas", None)
+        if canvas is None:
+            return False
+
+        normalized_steps = max(1, int(abs(steps or 1)))
+        if not self.can_reader_scroll_vertically(direction):
+            return False
+
+        canvas.yview_scroll(int(direction) * normalized_steps, "units")
+        self.store_current_reader_scroll_position()
+        return True
+
+    def handle_reader_mousewheel(self, event):
+        if getattr(self, "current_frame_name", "") != "reader" or not self.reader_current_pages:
+            return None
+
+        focused_widget = self.focus_get()
+        if isinstance(focused_widget, (tk.Entry, tk.Text, tk.Listbox)):
+            return None
+
+        event_num = getattr(event, "num", None)
+        event_delta = getattr(event, "delta", 0)
+        if event_num == 4:
+            direction = -1
+            step_count = 3
+        elif event_num == 5:
+            direction = 1
+            step_count = 3
+        else:
+            if event_delta == 0:
+                return "break"
+            direction = -1 if event_delta > 0 else 1
+            step_count = max(1, abs(int(event_delta)) // 120)
+
+        if self.scroll_reader_preview_vertically(direction, steps=step_count):
+            return "break"
+
+        if direction > 0:
+            self.change_reader_page(1)
+        else:
+            self.change_reader_page(-1)
+        return "break"
+
+    def show_reader_preview_placeholder(self, text=None):
+        canvas = getattr(self, "reader_preview_canvas", None)
+        self.reader_preview_placeholder = str(text or self.reader_preview_placeholder or "").strip()
+        if canvas is None:
+            return
+
+        canvas.delete("all")
+        self.reader_preview_photo = None
+        self.reader_preview_canvas_image_id = None
+        self.reader_preview_render_key = None
+        canvas_width = canvas.winfo_width()
+        canvas_height = canvas.winfo_height()
+        if canvas_width <= 1:
+            canvas_width = 240
+        if canvas_height <= 1:
+            canvas_height = 240
+        canvas.configure(scrollregion=(0, 0, canvas_width, canvas_height))
+        canvas.create_text(
+            canvas_width / 2,
+            canvas_height / 2,
+            text=self.reader_preview_placeholder,
+            fill="#d8d8d8",
+            width=max(canvas_width - 40, 180),
+            justify="center",
+            font=("Microsoft YaHei UI", 14),
+        )
+        canvas.xview_moveto(0)
+        canvas.yview_moveto(0)
+
+    def cancel_reader_preview_refresh(self):
+        if self.reader_preview_refresh_after_id:
+            try:
+                self.after_cancel(self.reader_preview_refresh_after_id)
+            except tk.TclError:
+                pass
+            self.reader_preview_refresh_after_id = None
+
+    def queue_reader_preview_refresh(self, reset_scroll=False, scroll_position=None, invalidate=False):
+        pending = self.reader_pending_preview_refresh or {
+            "reset_scroll": False,
+            "scroll_position": None,
+            "invalidate": False,
+        }
+        pending["reset_scroll"] = pending["reset_scroll"] or bool(reset_scroll)
+        pending["invalidate"] = pending["invalidate"] or bool(invalidate)
+
+        normalized_scroll_position = None
+        if scroll_position is not None:
+            normalized_scroll_position = (
+                normalize_reader_scroll_fraction(scroll_position[0]),
+                normalize_reader_scroll_fraction(scroll_position[1]),
+            )
+
+        if pending["reset_scroll"]:
+            pending["scroll_position"] = None
+        elif normalized_scroll_position is not None:
+            pending["scroll_position"] = normalized_scroll_position
+
+        self.reader_pending_preview_refresh = pending
+
+    def schedule_reader_preview_refresh(
+        self,
+        delay_ms=READER_PREVIEW_REFRESH_DELAY_MS,
+        reset_scroll=False,
+        scroll_position=None,
+        invalidate=False,
+    ):
+        self.queue_reader_preview_refresh(
+            reset_scroll=reset_scroll,
+            scroll_position=scroll_position,
+            invalidate=invalidate,
+        )
+        if self.reader_fullscreen_transition_in_progress:
+            return
+
+        self.cancel_reader_preview_refresh()
+        try:
+            self.reader_preview_refresh_after_id = self.after(
+                max(1, int(delay_ms or READER_PREVIEW_REFRESH_DELAY_MS)),
+                self.flush_scheduled_reader_preview_refresh,
+            )
+        except tk.TclError:
+            self.reader_preview_refresh_after_id = None
+
+    def flush_scheduled_reader_preview_refresh(self):
+        self.reader_preview_refresh_after_id = None
+        pending = self.reader_pending_preview_refresh or {}
+        self.reader_pending_preview_refresh = None
+        if pending.get("invalidate"):
+            self.reader_preview_render_key = None
+        self.refresh_reader_preview(
+            reset_scroll=bool(pending.get("reset_scroll", False)),
+            scroll_position=pending.get("scroll_position"),
+        )
+
+    def cancel_reader_fullscreen_transition(self):
+        if self.reader_fullscreen_transition_after_id:
+            try:
+                self.after_cancel(self.reader_fullscreen_transition_after_id)
+            except tk.TclError:
+                pass
+            self.reader_fullscreen_transition_after_id = None
+        self.reader_fullscreen_transition_in_progress = False
+
+    def finish_reader_fullscreen_transition(self, refresh=True):
+        self.reader_fullscreen_transition_after_id = None
+        self.reader_fullscreen_transition_in_progress = False
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        if not refresh or getattr(self, "current_frame_name", "") != "reader":
+            self.cancel_reader_preview_refresh()
+            self.reader_pending_preview_refresh = None
+            return
+        self.schedule_reader_preview_refresh(invalidate=True)
+
+    def get_reader_fullscreen_transition_delay_ms(self):
+        if os.name == "nt":
+            if self.reader_windows_fullscreen_mode == "exclusive":
+                return READER_EXCLUSIVE_FULLSCREEN_TRANSITION_DELAY_MS
+            return READER_SMOOTH_FULLSCREEN_TRANSITION_DELAY_MS
+        return READER_FULLSCREEN_TRANSITION_DELAY_MS
+
+    def begin_reader_fullscreen_transition(self, refresh=True):
+        self.cancel_reader_fullscreen_transition()
+        self.cancel_reader_preview_refresh()
+        self.reader_fullscreen_transition_in_progress = True
+        try:
+            self.reader_fullscreen_transition_after_id = self.after(
+                self.get_reader_fullscreen_transition_delay_ms(),
+                lambda: self.finish_reader_fullscreen_transition(refresh=refresh),
+            )
+        except tk.TclError:
+            self.reader_fullscreen_transition_after_id = None
+            self.reader_fullscreen_transition_in_progress = False
+            if refresh:
+                self.schedule_reader_preview_refresh(invalidate=True)
+
+    def get_window_state(self):
+        try:
+            return str(self.state())
+        except tk.TclError:
+            return "normal"
+
+    def remember_reader_window_state(self):
+        self.reader_window_state_before_fullscreen = self.get_window_state()
+        try:
+            self.reader_window_geometry_before_fullscreen = self.geometry()
+        except tk.TclError:
+            self.reader_window_geometry_before_fullscreen = ""
+
+    def apply_reader_fullscreen_window_state(self):
+        if os.name == "nt":
+            if self.reader_windows_fullscreen_mode == "exclusive":
+                try:
+                    self.state("normal")
+                except tk.TclError:
+                    pass
+                try:
+                    self.attributes("-topmost", True)
+                except tk.TclError:
+                    pass
+                try:
+                    self.attributes("-fullscreen", True)
+                except tk.TclError:
+                    try:
+                        self.state("zoomed")
+                    except tk.TclError:
+                        pass
+            else:
+                try:
+                    self.attributes("-fullscreen", False)
+                except tk.TclError:
+                    pass
+                try:
+                    self.attributes("-topmost", False)
+                except tk.TclError:
+                    pass
+                try:
+                    self.state("zoomed")
+                except tk.TclError:
+                    pass
+            return
+
+        try:
+            self.attributes("-fullscreen", True)
+        except tk.TclError:
+            pass
+
+    def restore_reader_window_state(self):
+        previous_state = self.reader_window_state_before_fullscreen or "normal"
+        previous_geometry = self.reader_window_geometry_before_fullscreen
+
+        try:
+            self.attributes("-topmost", False)
+        except tk.TclError:
+            pass
+
+        try:
+            self.attributes("-fullscreen", False)
+        except tk.TclError:
+            pass
+
+        try:
+            self.state("normal")
+        except tk.TclError:
+            pass
+
+        if previous_geometry and previous_state == "normal":
+            try:
+                self.geometry(previous_geometry)
+            except tk.TclError:
+                pass
+
+        if previous_state != "normal":
+            try:
+                self.state(previous_state)
+            except tk.TclError:
+                pass
+
+    def handle_reader_preview_configure(self):
+        if self.reader_source_image is None:
+            self.show_reader_preview_placeholder(self.reader_preview_placeholder)
+            return
+
+        if getattr(self, "current_frame_name", "") != "reader":
+            return
+
+        self.schedule_reader_preview_refresh(invalidate=True)
+
+    def handle_reader_zoom_mode_change(self, selected_label):
+        self.set_reader_zoom_mode(
+            self.get_reader_zoom_mode_value(selected_label),
+            reset_scroll=True,
+        )
+
+    def update_reader_zoom_controls(self):
+        has_pages = self.reader_current_entry is not None and bool(self.reader_current_pages)
+        control_state = "normal" if has_pages else "disabled"
+        effective_zoom = self.get_reader_effective_zoom_percent()
+
+        if hasattr(self, "reader_zoom_value_label"):
+            self.reader_zoom_value_label.configure(text=f"{effective_zoom}%")
+        if hasattr(self, "reader_zoom_out_button"):
+            self.reader_zoom_out_button.configure(state=control_state)
+        if hasattr(self, "reader_zoom_in_button"):
+            self.reader_zoom_in_button.configure(state=control_state)
+        if hasattr(self, "reader_zoom_reset_button"):
+            self.reader_zoom_reset_button.configure(state=control_state)
+        if hasattr(self, "reader_zoom_mode_menu"):
+            self.reader_zoom_mode_menu.configure(state=control_state)
+            self.reader_zoom_mode_menu.set(self.get_reader_zoom_mode_label(self.reader_zoom_mode))
+
+    def set_reader_zoom_mode(self, mode, persist=True, refresh=True, reset_scroll=False):
+        self.reader_zoom_mode = normalize_reader_zoom_mode(mode)
+        self.update_reader_zoom_controls()
+
+        if refresh:
+            self.refresh_reader_preview(reset_scroll=reset_scroll)
+        if persist:
+            self.persist_gui_state_snapshot()
+
+    def set_reader_zoom_percent(self, zoom_percent, persist=True, refresh=True, reset_scroll=False):
+        self.reader_zoom_percent = clamp_reader_zoom_percent(
+            zoom_percent,
+            fallback=self.reader_zoom_percent,
+        )
+        self.reader_zoom_mode = "manual"
+        self.update_reader_zoom_controls()
+
+        if refresh:
+            self.refresh_reader_preview(reset_scroll=reset_scroll)
+        if persist:
+            self.persist_gui_state_snapshot()
+
+    def adjust_reader_zoom(self, delta):
+        if self.reader_source_image is None:
+            return
+
+        base_zoom = self.get_reader_effective_zoom_percent()
+        self.set_reader_zoom_percent(base_zoom + int(delta), reset_scroll=True)
+
+    def reset_reader_zoom(self):
+        if self.reader_source_image is None:
+            return
+
+        self.set_reader_zoom_percent(100, reset_scroll=True)
 
     def set_reader_info_text(self, text):
         self.reader_info_textbox.configure(state="normal")
         self.reader_info_textbox.delete("1.0", "end")
         self.reader_info_textbox.insert("1.0", text)
         self.reader_info_textbox.configure(state="disabled")
+
+    def update_reader_focus_button(self):
+        if hasattr(self, "reader_focus_button"):
+            self.reader_focus_button.configure(
+                text="专注阅读中" if self.reader_fullscreen_mode else ("退出专注阅读" if self.reader_focus_mode else "专注阅读"),
+                state="disabled" if self.reader_fullscreen_mode else "normal",
+            )
+        if hasattr(self, "reader_workspace_hint_label"):
+            hint_text = (
+                "全屏阅读已开启：应用侧边栏和阅读页头部已隐藏。按 Esc 或双击预览区即可退出全屏。"
+                if self.reader_fullscreen_mode
+                else (
+                    "专注阅读已开启：左侧资料区和文件详情会暂时折叠，当前空间优先用于放大预览漫画页面。滚轮会先滚动页面，到边界时自动翻页；按 F11 可进入全屏。"
+                    if self.reader_focus_mode
+                    else "阅读页已独立出来，可从左侧浏览文件并在右侧翻页。滚轮会先滚动页面，到边界时自动翻页；开启专注阅读后会折叠资料区，按 F11 或双击预览区可进入全屏。"
+                )
+            )
+            self.reader_workspace_hint_label.configure(text=hint_text)
+
+    def update_reader_fullscreen_button(self):
+        if hasattr(self, "reader_fullscreen_button"):
+            self.reader_fullscreen_button.configure(
+                text="退出全屏" if self.reader_fullscreen_mode else "全屏阅读"
+            )
+
+    def set_reader_focus_mode(self, enabled, persist=True, refresh=True):
+        scroll_position = self.store_current_reader_scroll_position()
+        self.reader_focus_mode = bool(enabled)
+
+        if hasattr(self, "reader_sidebar_frame") and hasattr(self, "reader_content_frame"):
+            if self.reader_focus_mode:
+                self.reader_sidebar_frame.grid_remove()
+                self.reader_info_textbox.grid_remove()
+                self.reader_content_frame.grid_configure(
+                    row=1,
+                    column=0,
+                    columnspan=2,
+                    padx=20,
+                    pady=(0, 20),
+                )
+            else:
+                self.reader_sidebar_frame.grid()
+                self.reader_info_textbox.grid()
+                self.reader_content_frame.grid_configure(
+                    row=1,
+                    column=1,
+                    columnspan=1,
+                    padx=(10, 20),
+                    pady=(0, 20),
+                )
+
+        self.update_reader_focus_button()
+        self.update_reader_fullscreen_button()
+
+        if refresh:
+            self.schedule_reader_preview_refresh(
+                scroll_position=scroll_position,
+                invalidate=True,
+            )
+
+        if persist:
+            self.persist_gui_state_snapshot()
+
+    def toggle_reader_focus_mode(self):
+        self.set_reader_focus_mode(not self.reader_focus_mode)
+
+    def set_reader_fullscreen_mode(self, enabled, refresh=True):
+        target_mode = bool(enabled)
+        if target_mode == self.reader_fullscreen_mode:
+            self.update_reader_focus_button()
+            self.update_reader_fullscreen_button()
+            return
+
+        scroll_position = self.store_current_reader_scroll_position()
+        self.reader_fullscreen_mode = target_mode
+        self.begin_reader_fullscreen_transition(refresh=refresh)
+
+        if self.reader_fullscreen_mode:
+            self.remember_reader_window_state()
+            self.apply_reader_fullscreen_window_state()
+            self.reader_focus_mode_before_fullscreen = self.reader_focus_mode
+            self.set_reader_focus_mode(True, persist=False, refresh=False)
+            self.sidebar_frame.grid_remove()
+            self.reader_workspace_header.grid_remove()
+            self.reader_content_frame.grid_configure(padx=20, pady=20)
+            self.log("已进入全屏阅读模式")
+            self.status_label.configure(text="全屏阅读模式已开启")
+        else:
+            self.restore_reader_window_state()
+            self.sidebar_frame.grid()
+            self.reader_workspace_header.grid()
+            restored_focus_mode = bool(self.reader_focus_mode_before_fullscreen)
+            self.set_reader_focus_mode(restored_focus_mode, persist=False, refresh=False)
+            if restored_focus_mode:
+                self.reader_content_frame.grid_configure(padx=20, pady=(0, 20))
+            else:
+                self.reader_content_frame.grid_configure(padx=(10, 20), pady=(0, 20))
+            self.log("已退出全屏阅读模式")
+            self.status_label.configure(text="已退出全屏阅读模式")
+
+        self.update_reader_focus_button()
+        self.update_reader_fullscreen_button()
+
+        if refresh:
+            self.schedule_reader_preview_refresh(
+                scroll_position=scroll_position,
+                invalidate=True,
+            )
+
+    def toggle_reader_fullscreen_mode(self):
+        if getattr(self, "current_frame_name", "") != "reader":
+            self.select_frame_by_name("reader")
+        self.set_reader_fullscreen_mode(not self.reader_fullscreen_mode)
+
+    def get_reader_entry_kind_label(self, entry):
+        if not entry:
+            return ""
+
+        kind = entry.get("kind")
+        if kind == "folder":
+            return "文件夹"
+        if kind == "pdf":
+            return "PDF"
+        return entry.get("format") or "压缩包"
 
     def browse_reader_library_dir(self):
         directory = filedialog.askdirectory(title="选择漫画目录")
@@ -938,13 +2299,24 @@ class ComicDownloaderGUI(ctk.CTk):
         file_path = filedialog.askopenfilename(
             title="选择漫画文件",
             filetypes=[
-                ("Comic Archives", "*.cbz *.zip"),
+                ("Comic Files", "*.cbz *.zip *.cbr *.rar *.cb7 *.7z *.pdf"),
                 ("CBZ Files", "*.cbz"),
                 ("ZIP Files", "*.zip"),
+                ("CBR Files", "*.cbr"),
+                ("RAR Files", "*.rar"),
+                ("CB7 Files", "*.cb7"),
+                ("7z Files", "*.7z"),
+                ("PDF Files", "*.pdf"),
                 ("All Files", "*.*"),
             ],
         )
         if not file_path:
+            return
+        if self.show_comic_source_support_message(file_path, "打开"):
+            self.reader_source_entry.delete(0, tk.END)
+            self.reader_source_entry.insert(0, file_path)
+            self.reset_reader_session("当前文件需要额外支持，详情见上方提示。")
+            self.persist_gui_state_snapshot()
             return
         self.refresh_reader_library(initial_path=file_path)
         self.persist_gui_state_snapshot()
@@ -995,30 +2367,38 @@ class ComicDownloaderGUI(ctk.CTk):
             self.update_reader_file_actions(None)
             return
 
-        kind_label = "文件夹" if entry["kind"] == "folder" else "压缩包"
+        kind_label = self.get_reader_entry_kind_label(entry)
         modified_text = datetime.fromtimestamp(entry["modified_ts"]).strftime("%Y-%m-%d %H:%M:%S")
-        info_text = "\n".join(
-            [
-                f"名称: {entry['name']}",
-                f"类型: {kind_label}",
-                f"页数: {entry['page_count']}",
-                f"大小: {format_bytes(entry['size_bytes'])}",
-                f"修改时间: {modified_text}",
-                f"路径: {entry['path']}",
-            ]
-        )
+        info_lines = [
+            f"名称: {entry['name']}",
+            f"类型: {kind_label}",
+            f"页数: {entry['page_count']}",
+            f"大小: {format_bytes(entry['size_bytes'])}",
+            f"修改时间: {modified_text}",
+            f"路径: {entry['path']}",
+        ]
+        support_message = get_comic_source_requirement_message(entry["path"], action="打开")
+        if support_message:
+            info_lines.append("")
+            info_lines.append(f"提示: {support_message}")
+
+        info_text = "\n".join(info_lines)
         self.reader_title_label.configure(text=entry["name"])
         self.set_reader_info_text(info_text)
         self.update_reader_file_actions(entry)
 
     def reset_reader_session(self, placeholder="从左侧选择漫画后即可在这里翻页阅读"):
+        self.store_current_reader_scroll_position()
         self.reader_current_entry = None
         self.reader_current_pages = []
         self.reader_current_page_index = -1
         self.reader_source_image = None
-        self.reader_preview_image = None
-        self.reader_preview_label.configure(text=placeholder, image=None)
+        self.reader_preview_photo = None
+        self.reader_preview_canvas_image_id = None
+        self.reader_preview_render_key = None
+        self.show_reader_preview_placeholder(placeholder)
         self.update_reader_page_controls()
+        self.update_reader_zoom_controls()
 
     def refresh_reader_library(self, initial_path=None, select_first=True):
         if initial_path is not None:
@@ -1030,7 +2410,7 @@ class ComicDownloaderGUI(ctk.CTk):
             self.reader_listbox.delete(0, tk.END)
             self.reader_library_entries = []
             self.update_reader_details(None)
-            self.reset_reader_session("请先选择漫画目录或 CBZ/ZIP 文件")
+            self.reset_reader_session("请先选择漫画目录或 CBZ/ZIP/CBR/RAR/7z/PDF 文件")
             return
 
         expanded_source = str(Path(source_path).expanduser())
@@ -1043,6 +2423,17 @@ class ComicDownloaderGUI(ctk.CTk):
             self.update_reader_details(None)
             self.reset_reader_session("所选路径不存在，请重新选择")
             return
+
+        if Path(expanded_source).is_file():
+            support_message = get_comic_source_requirement_message(expanded_source, action="打开")
+            if support_message:
+                self.reader_listbox.delete(0, tk.END)
+                self.reader_library_entries = []
+                self.update_reader_details(None)
+                self.reset_reader_session("当前文件需要额外支持，详情见上方提示。")
+                if hasattr(self, "status_label"):
+                    self.status_label.configure(text="当前文件缺少必要支持")
+                return
 
         selected_entry = self.get_selected_reader_entry()
         previous_path = ""
@@ -1060,7 +2451,7 @@ class ComicDownloaderGUI(ctk.CTk):
         self.reader_library_entries = entries
         self.reader_listbox.delete(0, tk.END)
         for item in entries:
-            kind_text = "文件夹" if item["kind"] == "folder" else "CBZ/ZIP"
+            kind_text = self.get_reader_entry_kind_label(item)
             self.reader_listbox.insert(tk.END, f"{item['name']}  [{kind_text} · {item['page_count']} 页]")
 
         if not entries:
@@ -1123,6 +2514,11 @@ class ComicDownloaderGUI(ctk.CTk):
         if not entry:
             return False
 
+        if self.show_comic_source_support_message(entry["path"], "打开"):
+            if hasattr(self, "status_label"):
+                self.status_label.configure(text="当前文件缺少必要支持")
+            return False
+
         try:
             pages = list_comic_pages(entry["path"])
         except Exception as exc:
@@ -1138,13 +2534,15 @@ class ComicDownloaderGUI(ctk.CTk):
         except (TypeError, ValueError):
             target_page_number = 1
 
+        self.store_current_reader_scroll_position()
         self.reader_current_entry = entry
         self.reader_current_pages = pages
         self.reader_current_page_index = -1
-        self.set_reader_page(
+        if not self.set_reader_page(
             min(max(1, target_page_number), len(pages)) - 1,
             persist=persist,
-        )
+        ):
+            return False
         if announce:
             self.log(f"已打开本地漫画: {entry['name']}")
             self.status_label.configure(text=f"正在阅读: {entry['name']}")
@@ -1182,29 +2580,41 @@ class ComicDownloaderGUI(ctk.CTk):
         self.reader_last_button.configure(
             state="normal" if has_pages and self.reader_current_page_index < total_pages - 1 else "disabled"
         )
+        self.update_reader_zoom_controls()
 
     def set_reader_page(self, index, persist=True):
         if not self.reader_current_entry or not self.reader_current_pages:
-            return
+            return False
 
         if index < 0 or index >= len(self.reader_current_pages):
-            return
+            return False
+
+        previous_page_index = self.reader_current_page_index
+        if previous_page_index >= 0:
+            current_scroll_position = self.store_current_reader_scroll_position()
+        else:
+            current_scroll_position = (0.0, 0.0)
 
         page_name = self.reader_current_pages[index]
         try:
             self.reader_source_image = load_comic_page_image(self.reader_current_entry["path"], page_name)
         except Exception as exc:
             messagebox.showerror("错误", f"读取漫画页面失败: {exc}")
-            return
+            return False
 
+        if previous_page_index == index:
+            target_scroll_position = current_scroll_position
+        else:
+            target_scroll_position = self.get_reader_saved_scroll_position(page_index=index)
         self.reader_current_page_index = index
         self.update_reader_page_controls()
-        self.refresh_reader_preview()
+        self.refresh_reader_preview(scroll_position=target_scroll_position)
         self.status_label.configure(
             text=f"正在阅读 {self.reader_current_entry['name']} - 第 {index + 1}/{len(self.reader_current_pages)} 页"
         )
         if persist:
             self.persist_gui_state_snapshot()
+        return True
 
     def change_reader_page(self, delta):
         if self.reader_current_page_index < 0:
@@ -1233,7 +2643,22 @@ class ComicDownloaderGUI(ctk.CTk):
         self.set_reader_page(page_number - 1)
 
     def handle_reader_shortcut(self, action):
-        if getattr(self, "current_frame_name", "") != "reader" or not self.reader_current_pages:
+        if getattr(self, "current_frame_name", "") != "reader":
+            return
+
+        if action == "toggle_fullscreen":
+            self.toggle_reader_fullscreen_mode()
+            return
+
+        if action == "escape":
+            if self.reader_fullscreen_mode:
+                self.set_reader_fullscreen_mode(False)
+                return
+            if self.reader_focus_mode:
+                self.set_reader_focus_mode(False)
+            return
+
+        if not self.reader_current_pages:
             return
 
         focused_widget = self.focus_get()
@@ -1249,20 +2674,80 @@ class ComicDownloaderGUI(ctk.CTk):
         elif action == "last":
             self.go_to_last_reader_page()
 
-    def refresh_reader_preview(self):
-        if self.reader_source_image is None:
+    def refresh_reader_preview(self, reset_scroll=False, scroll_position=None):
+        self.cancel_reader_preview_refresh()
+        self.reader_pending_preview_refresh = None
+        canvas = getattr(self, "reader_preview_canvas", None)
+        if canvas is None:
             return
 
-        preview_width = max(self.reader_preview_label.winfo_width() - 20, 240)
-        preview_height = max(self.reader_preview_label.winfo_height() - 20, 240)
-        preview_image = self.reader_source_image.copy()
-        preview_image.thumbnail((preview_width, preview_height), Image.LANCZOS)
-        self.reader_preview_image = ctk.CTkImage(
-            light_image=preview_image,
-            dark_image=preview_image,
-            size=preview_image.size,
+        if self.reader_source_image is None:
+            self.show_reader_preview_placeholder(self.reader_preview_placeholder)
+            self.update_reader_zoom_controls()
+            return
+
+        if reset_scroll:
+            target_scroll_position = (0.0, 0.0)
+        elif scroll_position is not None:
+            target_scroll_position = (
+                normalize_reader_scroll_fraction(scroll_position[0]),
+                normalize_reader_scroll_fraction(scroll_position[1]),
+            )
+        else:
+            target_scroll_position = self.get_reader_canvas_scroll_position()
+
+        viewport_size = self.get_reader_preview_viewport_size()
+        target_size = calculate_reader_image_size(
+            self.reader_source_image.size,
+            viewport_size,
+            zoom_mode=self.reader_zoom_mode,
+            zoom_percent=self.reader_zoom_percent,
         )
-        self.reader_preview_label.configure(image=self.reader_preview_image, text="")
+        render_key = (
+            id(self.reader_source_image),
+            self.reader_current_page_index,
+            self.reader_zoom_mode,
+            self.reader_zoom_percent,
+            viewport_size,
+            target_size,
+        )
+
+        if self.reader_preview_render_key == render_key and self.reader_preview_canvas_image_id is not None:
+            self.apply_reader_scroll_position(target_scroll_position)
+            self.update_reader_zoom_controls()
+            return
+
+        if target_size == self.reader_source_image.size:
+            preview_image = self.reader_source_image.copy()
+        else:
+            preview_image = self.reader_source_image.resize(target_size, Image.LANCZOS)
+
+        preview_photo = ImageTk.PhotoImage(preview_image)
+        canvas.delete("all")
+
+        viewport_width, viewport_height = viewport_size
+        image_width, image_height = target_size
+        image_x = max((viewport_width - image_width) // 2, 0)
+        image_y = max((viewport_height - image_height) // 2, 0)
+        self.reader_preview_canvas_image_id = canvas.create_image(
+            image_x,
+            image_y,
+            anchor="nw",
+            image=preview_photo,
+        )
+        canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                max(viewport_width, image_width),
+                max(viewport_height, image_height),
+            )
+        )
+
+        self.reader_preview_photo = preview_photo
+        self.reader_preview_render_key = render_key
+        self.apply_reader_scroll_position(target_scroll_position)
+        self.update_reader_zoom_controls()
 
     # ========== 核心业务逻辑 (保持不变) ==========
     def browse_save_dir(self):
@@ -1540,7 +3025,7 @@ class ComicDownloaderGUI(ctk.CTk):
                         break
                     
                     progress = (i / total_chapters) * 100
-                    self.queue.put(("progress", progress))
+                    self.enqueue_progress_update(progress, force=True)
                     self.queue.put(("info", f"正在下载章节 {i+1}/{total_chapters}: {chapter_name}"))
                     
                     chapter_url = self.comic_dl_downloader.resolve_chapter_url(url, chapter_url)
@@ -1554,7 +3039,7 @@ class ComicDownloaderGUI(ctk.CTk):
                                 curr, total = map(int, match.groups())
                                 chapter_progress = (curr / total) * (100 / total_chapters)
                                 total_progress = (i / total_chapters) * 100 + chapter_progress
-                                self.queue.put(("progress", total_progress))
+                                self.enqueue_progress_update(total_progress)
                         self.queue.put(("info", msg))
                     
                     result = self.comic_dl_downloader.download_chapter(self.comic_title, chapter_name, chapter_url, parser, chapter_progress_callback)
@@ -2060,6 +3545,13 @@ class ComicDownloaderGUI(ctk.CTk):
     def restore_reader_state(self):
         reader_state = self.gui_state.get("reader", {})
         source_path = reader_state.get("source_path", self.default_getcomics_save_dir)
+        active_path = str(reader_state.get("active_path") or "").strip()
+        active_page = reader_state.get("active_page", 0)
+        if active_path and active_page:
+            self.reader_scroll_positions[(active_path, max(int(active_page) - 1, 0))] = (
+                normalize_reader_scroll_fraction(reader_state.get("scroll_x")),
+                normalize_reader_scroll_fraction(reader_state.get("scroll_y")),
+            )
         self.refresh_reader_library(initial_path=source_path, select_first=False)
 
         target_path = reader_state.get("active_path") or reader_state.get("selected_path")
@@ -2082,6 +3574,7 @@ class ComicDownloaderGUI(ctk.CTk):
 
     def collect_gui_state(self):
         selected_reader_entry = self.get_selected_reader_entry()
+        active_scroll_x, active_scroll_y = self.get_reader_canvas_scroll_position()
         return {
             "getcomics": {
                 "query": self.getcomics_query_entry.get().strip(),
@@ -2115,6 +3608,19 @@ class ComicDownloaderGUI(ctk.CTk):
                 "selected_path": selected_reader_entry["path"] if selected_reader_entry else "",
                 "active_path": self.reader_current_entry["path"] if self.reader_current_entry else "",
                 "active_page": self.reader_current_page_index + 1 if self.reader_current_page_index >= 0 else 0,
+                "zoom_mode": self.reader_zoom_mode,
+                "zoom_percent": self.reader_zoom_percent,
+                "focus_mode": self.reader_focus_mode,
+                "scroll_x": active_scroll_x,
+                "scroll_y": active_scroll_y,
+            },
+            "settings": {
+                "appearance_mode": self.appearance_mode,
+                "reader_windows_fullscreen_mode": self.reader_windows_fullscreen_mode,
+                "rename_api_key": self.rename_api_key,
+                "rename_api_url": self.rename_api_url,
+                "rename_api_model": self.rename_api_model,
+                "rename_api_timeout": self.rename_api_timeout,
             },
         }
 
@@ -2381,7 +3887,11 @@ class ComicDownloaderGUI(ctk.CTk):
             try:
                 def progress_callback(msg):
                     if isinstance(msg, tuple) and msg[0] == "progress":
-                        self.queue.put(msg)
+                        enqueue_progress = getattr(self, "enqueue_progress_update", None)
+                        if callable(enqueue_progress):
+                            enqueue_progress(msg[1])
+                        else:
+                            self.queue.put(("progress", msg[1]))
                     else:
                         self.queue.put(("info", msg))
                 
@@ -2397,7 +3907,11 @@ class ComicDownloaderGUI(ctk.CTk):
                 )
                 
                 if not self.is_getcomics_cancelled:
-                    self.queue.put(("progress", 100))
+                    enqueue_progress = getattr(self, "enqueue_progress_update", None)
+                    if callable(enqueue_progress):
+                        enqueue_progress(100, force=True)
+                    else:
+                        self.queue.put(("progress", 100))
                     self.queue.put(("info", "所有漫画下载完成"))
                     self.queue.put(("complete", task_label))
             except Exception as e:
@@ -2441,13 +3955,81 @@ class ComicDownloaderGUI(ctk.CTk):
             self.getcomics_save_entry.insert(0, directory)
             self.persist_gui_state_snapshot()
 
-    def check_queue(self):
+    def enqueue_progress_update(self, progress_value, force=False):
         try:
-            while not self.queue.empty():
+            progress = float(progress_value)
+        except (TypeError, ValueError):
+            return
+
+        progress = max(0.0, min(100.0, progress))
+        with self.queue_throttle_lock:
+            now = time.monotonic()
+            last_time = self._queued_progress_state["timestamp"]
+            last_value = self._queued_progress_state["value"]
+            if (
+                not force
+                and last_value is not None
+                and abs(progress - last_value) < QUEUE_PROGRESS_MIN_DELTA
+                and (now - last_time) < QUEUE_PROGRESS_MIN_INTERVAL
+            ):
+                return
+            self._queued_progress_state = {"timestamp": now, "value": progress}
+
+        self.queue.put(("progress", progress))
+
+    def append_log_lines(self, lines):
+        entries = [str(line) for line in lines if str(line).strip()]
+        if not entries:
+            return
+
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.insert("end", "\n".join(entries) + "\n")
+        self.log_textbox.see("end")
+        self.log_textbox.configure(state="disabled")
+
+    def set_progress_value(self, progress_value):
+        try:
+            progress = max(0.0, min(100.0, float(progress_value)))
+        except (TypeError, ValueError):
+            return
+
+        self.progress_bar.set(progress / 100)
+        self.percent_label.configure(text=f"{int(round(progress))}%")
+
+    def set_latest_error_text(self, message=None):
+        text = str(message or "").strip() or "暂无错误"
+        self.logs_error_value_label.configure(text=text)
+
+    def check_queue(self):
+        pending_logs = []
+        pending_status = None
+        pending_progress = None
+        queue_has_more = False
+
+        def flush_pending():
+            nonlocal pending_logs, pending_status, pending_progress
+
+            if pending_logs:
+                self.append_log_lines(pending_logs)
+                pending_logs = []
+            if pending_status is not None:
+                self.status_label.configure(text=pending_status)
+                pending_status = None
+            if pending_progress is not None:
+                self.set_progress_value(pending_progress)
+                pending_progress = None
+
+        try:
+            processed = 0
+            while processed < QUEUE_BATCH_LIMIT:
                 try:
-                    message = self.queue.get_nowait()
-                    msg_type, msg_data = message
-                    
+                    msg_type, msg_data = self.queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                processed += 1
+
+                try:
                     if msg_type == "success":
                         comic_title, chapter_links = msg_data
                         self.comic_title = comic_title
@@ -2455,9 +4037,9 @@ class ComicDownloaderGUI(ctk.CTk):
                         self.chapter_listbox.delete(0, tk.END)
                         for chapter_name, _ in chapter_links:
                             self.chapter_listbox.insert(tk.END, chapter_name)
-                        self.log(f"成功获取漫画信息: {comic_title}")
+                        pending_logs.append(f"成功获取漫画信息: {comic_title}")
                         self.fetch_button.configure(state="normal")
-                    
+
                     elif msg_type == "getcomics_success":
                         comic_links = msg_data.get("comic_links", {}) if isinstance(msg_data, dict) else msg_data
                         current_page = msg_data.get("page", 0) if isinstance(msg_data, dict) else 0
@@ -2467,74 +4049,86 @@ class ComicDownloaderGUI(ctk.CTk):
                         self.set_getcomics_view_mode("search", persist=False)
                         self.remember_getcomics_search()
                         self.persist_gui_state_snapshot()
-                        self.log(f"成功搜索到第 {self.getcomics_search_current_page} 页，共 {len(comic_links)} 个漫画")
+                        pending_logs.append(
+                            f"成功搜索到第 {self.getcomics_search_current_page} 页，共 {len(comic_links)} 个漫画"
+                        )
                         self.update_getcomics_pagination_controls(searching=False)
-                    
+
                     elif msg_type == "error":
-                        self.log(f"错误: {msg_data}")
-                        messagebox.showerror("错误", msg_data)
+                        flush_pending()
+                        error_text = str(msg_data)
+                        self.append_log_lines([f"错误: {error_text}"])
+                        self.set_latest_error_text(error_text)
+                        messagebox.showerror("错误", error_text)
                         self.fetch_button.configure(state="normal")
                         self.getcomics_search_button.configure(state="normal")
-                    
+
                     elif msg_type == "log":
-                        self.log(msg_data)
-                    
+                        pending_logs.append(str(msg_data))
+
                     elif msg_type == "progress":
-                        progress_val = msg_data / 100
-                        self.progress_bar.set(progress_val)
-                        self.percent_label.configure(text=f"{int(msg_data)}%")
-                    
+                        pending_progress = msg_data
+
                     elif msg_type == "info":
-                        self.log(msg_data)
-                        self.status_label.configure(text=msg_data)
-                    
+                        info_text = str(msg_data)
+                        pending_logs.append(info_text)
+                        pending_status = info_text
+
                     elif msg_type == "fetch_done":
+                        flush_pending()
                         self.progress_bar.stop()
                         self.progress_bar.configure(mode="determinate")
                         self.fetch_button.configure(state="normal")
                         self.reset_progress()
+
                     elif msg_type == "search_getcomics_done":
+                        flush_pending()
                         self.progress_bar.stop()
                         self.progress_bar.configure(mode="determinate")
                         self.update_getcomics_pagination_controls(searching=False)
                         self.reset_progress()
+
                     elif msg_type == "done":
+                        flush_pending()
                         self.download_thread = None
                         self.download_button.configure(state="normal")
                         self.cancel_button.configure(state="disabled")
-                        self.progress_bar.set(1)
-                        self.percent_label.configure(text="100%")
+                        self.set_progress_value(100)
+
                     elif msg_type == "getcomics_done":
+                        flush_pending()
                         self.getcomics_thread = None
                         self.getcomics_download_button.configure(state="normal")
                         self.update_getcomics_view_toggle_button()
                         self.getcomics_cancel_button.configure(state="disabled")
-                        self.progress_bar.set(1)
-                        self.percent_label.configure(text="100%")
+                        self.set_progress_value(100)
+
                     elif msg_type == "convert_done":
+                        flush_pending()
                         self.convert_button.configure(state="normal")
-                        self.progress_bar.set(1)
-                        self.percent_label.configure(text="100%")
+                        self.set_progress_value(100)
+
                     elif msg_type == "complete":
-                        messagebox.showinfo("完成", msg_data)
-                        self.log(f"任务完成: {msg_data}")
-                except queue.Empty:
-                    break
+                        flush_pending()
+                        completion_text = str(msg_data)
+                        self.append_log_lines([f"任务完成: {completion_text}"])
+                        messagebox.showinfo("完成", completion_text)
                 except Exception as e:
                     print(f"Error processing queue message: {e}")
                     continue
+
+            flush_pending()
+            queue_has_more = not self.queue.empty()
         finally:
             try:
                 if self.winfo_exists():
-                    self.queue_check_after_id = self.after(100, self.check_queue)
+                    interval = QUEUE_BUSY_POLL_MS if queue_has_more else QUEUE_EMPTY_POLL_MS
+                    self.queue_check_after_id = self.after(interval, self.check_queue)
             except tk.TclError:
                 self.queue_check_after_id = None
 
     def log(self, message):
-        self.log_textbox.configure(state="normal")
-        self.log_textbox.insert("end", message + "\n")
-        self.log_textbox.see("end")
-        self.log_textbox.configure(state="disabled")
+        self.append_log_lines([message])
 
     def clear_logs(self):
         self.log_textbox.configure(state="normal")
@@ -2543,10 +4137,30 @@ class ComicDownloaderGUI(ctk.CTk):
 
     def show_log_menu(self, event):
         self.log_menu.post(event.x_root, event.y_root)
-    
+
+    def copy_logs_to_clipboard(self):
+        log_text = self.log_textbox.get("1.0", "end").strip()
+        if not log_text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(log_text)
+
+    def open_log_file(self):
+        log_path = Path(log_filename).resolve()
+        try:
+            os.startfile(str(log_path))
+        except AttributeError:
+            webbrowser.open(log_path.as_uri())
+        except OSError as exc:
+            messagebox.showerror("错误", f"无法打开日志文件: {exc}")
+
+    def open_logs_folder(self):
+        self.open_folder(str(Path(log_filename).resolve().parent))
+
     def reset_progress(self):
-        self.progress_bar.set(0)
-        self.percent_label.configure(text="0%")
+        with self.queue_throttle_lock:
+            self._queued_progress_state = {"timestamp": 0.0, "value": None}
+        self.set_progress_value(0)
         self.status_label.configure(text="准备就绪")
 
     def select_all(self):
@@ -2556,7 +4170,20 @@ class ComicDownloaderGUI(ctk.CTk):
         self.chapter_listbox.select_clear(0, tk.END)
 
     def browse_convert_input(self):
-        input_path = filedialog.askopenfilename(title="选择文件夹或 ZIP 文件")
+        input_path = filedialog.askopenfilename(
+            title="选择漫画源文件",
+            filetypes=[
+                ("Comic Sources", "*.cbz *.zip *.cbr *.rar *.cb7 *.7z *.pdf"),
+                ("CBZ Files", "*.cbz"),
+                ("ZIP Files", "*.zip"),
+                ("CBR Files", "*.cbr"),
+                ("RAR Files", "*.rar"),
+                ("CB7 Files", "*.cb7"),
+                ("7z Files", "*.7z"),
+                ("PDF Files", "*.pdf"),
+                ("All Files", "*.*"),
+            ],
+        )
         if not input_path:
             input_path = filedialog.askdirectory(title="选择文件夹")
         if input_path:
@@ -2575,6 +4202,8 @@ class ComicDownloaderGUI(ctk.CTk):
         if not input_path or not output_path:
             messagebox.showerror("错误", "请选择输入和输出路径")
             return
+        if self.show_comic_source_support_message(input_path, "转换"):
+            return
         
         self.convert_button.configure(state="disabled")
         self.reset_progress()
@@ -2583,12 +4212,12 @@ class ComicDownloaderGUI(ctk.CTk):
             try:
                 def progress_callback(msg):
                     if isinstance(msg, tuple) and msg[0] == "progress":
-                        self.queue.put(msg)
+                        self.enqueue_progress_update(msg[1])
                     elif "添加图片" in msg:
                         match = re.search(r"(\d+)/(\d+)", msg)
                         if match:
                             curr, total = map(int, match.groups())
-                            self.queue.put(("progress", (curr / total) * 100))
+                            self.enqueue_progress_update((curr / total) * 100)
                         self.queue.put(("info", msg))
                     else:
                         self.queue.put(("info", msg))
@@ -2674,6 +4303,15 @@ class ComicDownloaderGUI(ctk.CTk):
                 pass
             self.queue_check_after_id = None
 
+        self.cancel_reader_preview_refresh()
+        self.cancel_reader_fullscreen_transition()
+
+        if getattr(self, "reader_fullscreen_mode", False):
+            try:
+                self.attributes("-fullscreen", False)
+            except tk.TclError:
+                pass
+
         if (self.download_thread and self.download_thread.is_alive()) or (self.getcomics_thread and self.getcomics_thread.is_alive()):
             if messagebox.askokcancel("确认", "正在任务中，确定关闭吗？"):
                 self.persist_gui_state_snapshot()
@@ -2705,6 +4343,11 @@ class ComicDownloaderGUI(ctk.CTk):
     def rename_analyze_with_ai(self):
         if not self.rename_files:
             return
+        try:
+            self.get_rename_api_request_settings()
+        except ValueError as exc:
+            messagebox.showerror("错误", str(exc))
+            return
         custom_prompt = self.rename_prompt_text.get("1.0", "end").strip()
         folder_name = os.path.basename(self.rename_folder_path.get()) if self.rename_include_folder.get() else ""
         
@@ -2727,18 +4370,26 @@ class ComicDownloaderGUI(ctk.CTk):
         threading.Thread(target=analyze_thread, daemon=True).start()
 
     def rename_analyze_with_deepseek(self, filename, custom_prompt, folder_name):
-        if not DEEPSEEK_API_KEY:
-            raise ValueError("DeepSeek API key is not configured. Set DEEPSEEK_API_KEY before using AI rename.")
+        api_settings = self.get_rename_api_request_settings()
         extension = os.path.splitext(filename)[1]
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_settings['api_key']}",
+        }
         user_prompt = f"分析并标准化文件名：{filename}"
-        if folder_name: user_prompt += f"\n文件夹名：{folder_name}"
+        if folder_name:
+            user_prompt += f"\n文件夹名：{folder_name}"
         payload = {
-            "model": "deepseek-chat",
+            "model": api_settings["api_model"],
             "messages": [{"role": "system", "content": custom_prompt}, {"role": "user", "content": user_prompt}],
             "temperature": 0.1
         }
-        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=DEEPSEEK_TIMEOUT)
+        response = requests.post(
+            api_settings["api_url"],
+            headers=headers,
+            json=payload,
+            timeout=api_settings["api_timeout"],
+        )
         response.raise_for_status()
         result = response.json()
         choices = result.get("choices") or []

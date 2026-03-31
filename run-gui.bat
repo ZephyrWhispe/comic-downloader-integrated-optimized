@@ -26,7 +26,7 @@ if exist "%VENV_PYTHON%" (
     )
 )
 
-"%PYTHON_EXE%" -c "import customtkinter, PIL" > nul 2>&1
+"%PYTHON_EXE%" -c "import PySide6, PIL" > nul 2>&1
 if errorlevel 1 (
     echo [ERROR] GUI dependencies are missing in the selected Python environment. Please run install.bat first.
     pause
@@ -34,5 +34,5 @@ if errorlevel 1 (
 )
 
 echo Starting Comic Downloader GUI...
-"%PYTHON_EXE%" -m core.gui
+"%PYTHON_EXE%" -m core.qt_gui
 pause

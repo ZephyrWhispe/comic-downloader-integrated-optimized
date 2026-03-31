@@ -9,6 +9,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sites.registry import SITE_MODULES, get_site_module
+from core.comic_reader import get_comic_source_requirement_message, iter_cbz_export_entries
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -650,10 +651,10 @@ class ComicDownloader:
 
     def convert_to_cbz(self, input_path, output_path, progress_callback=None):
         """
-        将文件夹或 zip 文件转换为 CBZ 文件
+        将本地漫画源转换为 CBZ 文件
         
         Args:
-            input_path: 输入文件夹或 zip 文件路径
+            input_path: 输入文件夹或漫画文件路径
             output_path: 输出 CBZ 文件路径
             progress_callback: 进度回调函数
             
@@ -663,51 +664,32 @@ class ComicDownloader:
         try:
             if progress_callback:
                 progress_callback(f"开始转换: {input_path}")
+
+            support_message = get_comic_source_requirement_message(input_path, action="转换")
+            if support_message:
+                if progress_callback:
+                    progress_callback(f"错误: {support_message}")
+                return False
+
+            try:
+                export_entries = list(iter_cbz_export_entries(input_path))
+            except Exception as exc:
+                if progress_callback:
+                    progress_callback(f"错误: {exc}")
+                return False
+
+            if not export_entries:
+                if progress_callback:
+                    progress_callback("错误: 输入源中没有找到可转换的图片页面")
+                return False
             
             # 创建 CBZ 文件
             with zipfile.ZipFile(output_path, 'w') as zipf:
-                if os.path.isdir(input_path):
-                    # 处理文件夹
-                    image_files = []
-                    for root, _, files in os.walk(input_path):
-                        for file in files:
-                            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
-                                image_files.append(os.path.join(root, file))
-                    
-                    if not image_files:
-                        if progress_callback:
-                            progress_callback("错误: 文件夹中没有找到图片文件")
-                        return False
-                    
-                    total = len(image_files)
-                    for i, img_path in enumerate(image_files, 1):
-                        arcname = os.path.relpath(img_path, input_path)
-                        zipf.write(img_path, arcname)
-                        if progress_callback:
-                            progress_callback(f"添加图片 {i}/{total}")
-                elif os.path.isfile(input_path) and input_path.lower().endswith('.zip'):
-                    # 处理 zip 文件
-                    with zipfile.ZipFile(input_path, 'r') as input_zip:
-                        # 过滤出图片文件
-                        image_files = [f for f in input_zip.namelist() 
-                                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))]
-                        
-                        if not image_files:
-                            if progress_callback:
-                                progress_callback("错误: ZIP 文件中没有找到图片文件")
-                            return False
-                        
-                        total = len(image_files)
-                        for i, img_name in enumerate(image_files, 1):
-                            # 读取文件内容并写入新的 CBZ
-                            with input_zip.open(img_name) as f:
-                                zipf.writestr(img_name, f.read())
-                            if progress_callback:
-                                progress_callback(f"添加图片 {i}/{total}")
-                else:
+                total = len(export_entries)
+                for i, (arcname, data) in enumerate(export_entries, 1):
+                    zipf.writestr(arcname, data)
                     if progress_callback:
-                        progress_callback("错误: 输入路径必须是文件夹或 ZIP 文件")
-                    return False
+                        progress_callback(f"添加图片 {i}/{total}")
             
             if progress_callback:
                 progress_callback(f"转换完成: {output_path}")

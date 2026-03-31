@@ -4,9 +4,13 @@ beautifulsoup4
 rich
 cloudscraper
 customtkinter
+PySide6
 Pillow
 playwright
 aiohttp
 requests-toolbelt
+py7zr
+pypdfium2
+rarfile
 
 
